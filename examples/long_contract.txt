@@ -1,0 +1,17 @@
+Master Services Agreement Summary
+
+Vendor: Northstar Analytics
+Customer: ExampleCo
+Effective date: 2026-07-01
+
+Payment terms:
+Invoices are due within 30 days of receipt. Late balances accrue a 1.5% monthly fee after the due date. The setup fee is GBP 2,000 and the monthly service fee is GBP 850.
+
+Service obligations:
+Northstar Analytics must provide weekly status reports every Friday. The production analytics API must maintain 99.5% uptime each calendar month. Severity 1 incidents require a written incident review within 3 business days.
+
+Termination:
+Either party may terminate for material breach if the breach is not cured within 15 days after written notice. Convenience termination requires 60 days notice.
+
+Confidentiality:
+Both parties must protect confidential information using at least reasonable care. Customer data must not be used for model training without written approval.

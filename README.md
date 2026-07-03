@@ -1,0 +1,223 @@
+# Matryoshka Inference
+
+**Lossless local LLM acceleration on Apple Silicon** — semantic prompt
+compression (works with *any* model, including Ollama) composed with verified
+speculative decoding (Orthrus dual-view diffusion on MLX), a per-request mode
+router, and a DSpark-style speculation scheduler. Every accelerated path is
+verified by the exact autoregressive pass, so output quality is preserved by
+construction — and every claim in this README comes from a benchmark you can
+re-run from the CLI.
+
+**Headline (measured, 30-task long-context QA, M4 Max, Orthrus-Qwen3-4B):**
+
+| | plain decode | accelerated decode |
+|---|---|---|
+| raw prompt | 1.52 s (baseline) | 1.02 s |
+| compressed prompt | 0.90 s | **0.55 s → 2.79× faster** |
+
+Answer quality with compression was *equal or better* than raw (0.959 vs 0.944 —
+less distractor text). Zero errors in 180 result rows.
+
+## How it works
+
+Two independent levers that attack different bottlenecks, so they multiply:
+
+```
+long input ──[semantic compressor]──► short prompt      (attacks PREFILL, any model)
+                                          │
+                                 [mode router: per request]
+                                          │
+                    structured/reasoning ─┴─ free-form prose
+                             │                    │
+              [diffusion draft → AR verify]   [plain AR]
+              (attacks DECODE; scheduler       (drafting loses here —
+               backs off if drafts fail)        measured, not assumed)
+```
+
+1. **Semantic compression** (`extractive_relevance`, `semantic_brief`, …) cuts
+   long prompts to 25–40% of their tokens while preserving the facts needed to
+   answer. Works with Ollama, llama.cpp, MLX — anything.
+2. **Orthrus dual-view diffusion decoding** (vendored, MIT) proposes multi-token
+   blocks that the same model's AR pass verifies — 2.2–3.5× on structured /
+   repetitive / reasoning output, scaling with model size (8B > 4B > 1.7B).
+3. **Router + scheduler** keep it safe: prompts routed to the winning mode per
+   request; inside diffusion mode, a DSpark-style scheduler drops to a plain-AR
+   lane when measured acceptance collapses (worst case 0.90× instead of 0.55×).
+4. A **copy proposer** (CopySpec-style) serves repeated spans (JSON, templates)
+   without even paying the draft pass.
+
+## Install
+
+```bash
+git clone https://github.com/RT123-new/matryoshka-inference
+cd matryoshka-inference
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[orthrus,dev]"     # [orthrus] = MLX decode path (Apple Silicon)
+pip install -e .                    # compression-only (any platform / runtime)
+pytest -q                           # 30 tests
+```
+
+Orthrus checkpoints download automatically from Hugging Face on first use
+(`chiennv/Orthrus-Qwen3-1.7B` / `-4B` / `-8B`; ~4/8/16 GB).
+
+## Quickstart
+
+### 1. Accelerated OpenAI-compatible server (MLX, Apple Silicon)
+
+```bash
+sclab serve --model orthrus-qwen3-4b --port 8977
+```
+
+Then from anything that speaks the OpenAI API:
+
+```bash
+curl http://127.0.0.1:8977/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "orthrus-qwen3-4b",
+  "messages": [{"role": "user", "content": "Output a JSON array of 5 user objects."}],
+  "max_tokens": 300, "stream": true
+}'
+```
+
+The response's `sclab` field reports decode mode, accepted-tokens-per-pass and
+source mix, so you can see the acceleration working. `--mode auto` (default)
+routes each request; force `--mode diffusion` or `--mode ar` to pin it.
+
+### 2. Compression with Ollama (any model, today)
+
+Compress a long document before sending it — measured 1.36× faster at equal
+quality on a 35B MoE, and up to 1.9× on long contexts:
+
+```bash
+Q="What is the late payment fee and when does it start accruing?"
+sclab compress --document contract.txt --question "$Q" --stats \
+  | ollama run gemma4:latest "Answer from this source:\n$(cat -)\n\nQuestion: $Q"
+```
+
+Or run the built-in benchmark harness against your own Ollama model:
+
+```bash
+sclab single --runtime ollama --model gemma4:latest \
+  --document examples/long_contract.txt \
+  --question "$Q" --compressor extractive_relevance
+```
+
+### 3. Reproduce the findings
+
+```bash
+sclab benchmark --runtime orthrus-mlx --model orthrus-qwen3-4b \
+  --dataset data/tasks/synthetic_long.jsonl \
+  --compressors raw,semantic_brief,extractive_relevance \
+  --max-tokens 160 --runtime-options '{"mode":"diffusion","block_size":16}' \
+  --out runs/my_repro
+```
+
+Every run writes raw JSONL + a Markdown report, always against a raw baseline.
+
+## Using it with popular tools
+
+### Hermes Agent (desktop)
+
+Nous Research's Hermes desktop app connects to any OpenAI-compatible endpoint:
+
+1. `sclab serve --model orthrus-qwen3-4b --port 8977`
+2. In Hermes' setup wizard (or Settings → Providers), choose **Custom
+   OpenAI-compatible endpoint**.
+3. Base URL: `http://127.0.0.1:8977/v1` · API key: anything (not checked) ·
+   Model: `orthrus-qwen3-4b`.
+
+Hermes' `/models` probe is supported, so the model appears in its picker.
+Config lands in `~/.hermes/config.yaml` if you prefer editing it directly.
+
+### Ollama
+
+Two ways to benefit:
+
+- **Compression layer** (no server needed): use `sclab compress` / `sclab
+  single` / `sclab benchmark --runtime ollama` as above. Works with every model
+  in your `ollama list`.
+- **Tip for reasoning models** (Gemma, Ornith, Qwen): the harness defaults to
+  `think=false` because thinking-mode models otherwise burn the token budget on
+  hidden reasoning and return empty answers — we hit this on both `gemma4` and
+  `ornith-moe`.
+
+### Open WebUI / LM Studio / Jan / anything OpenAI-compatible
+
+Point the app's OpenAI-compatible provider at `http://127.0.0.1:8977/v1` with
+any API key. Streaming (SSE) and non-streaming are both supported.
+
+### Python (openai SDK)
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8977/v1", api_key="local")
+r = client.chat.completions.create(
+    model="orthrus-qwen3-4b",
+    messages=[{"role": "user", "content": "Solve step by step: 3x+7=28"}],
+)
+print(r.choices[0].message.content)
+```
+
+## Findings (all measured on an M4 Max / 64 GB, greedy decoding)
+
+The full story is in [`docs/final_report.md`](docs/final_report.md); raw data in
+[`results/`](results/). The short version:
+
+**What works**
+
+- **Compression × diffusion multiply: 2.79×** end-to-end on long-context QA at
+  equal-or-better quality ([docs](docs/orthrus_phase4_results.md)).
+- **The speedup grows with model size** — json workload: 2.06× (1.7B) → 2.26×
+  (4B) → **3.49× (8B)** — because bigger models are memory-bandwidth-bound, so
+  each avoided sequential pass is worth more ([docs](docs/orthrus_phase1_results.md)).
+- **Per-request routing beats both pure strategies** (1.48× vs always-AR, 1.33×
+  vs always-diffusion on mixed workloads) ([docs](docs/orthrus_phase5_results.md)).
+- **A DSpark-style speculation scheduler makes always-on diffusion safe**: worst
+  case improves 0.55× → 0.90× while winning workloads keep their full speedup
+  ([docs](docs/dspark_integration_results.md)).
+- **Copy-speculation** serves 40% of tokens on repetitive JSON at +7% throughput.
+- Compression alone: **1.36× at identical quality on a 35B MoE via Ollama**
+  ([docs](docs/ornith_moe_real_test.md)).
+
+**What doesn't (negative results, kept visible)**
+
+- **Layer-skip self-speculation on a stock model: net loss** (0.26–0.41×) —
+  untrained early-exit logits don't draft ([docs](docs/orthrus_phase5_4_layerskip.md)).
+- **DSpark-style confidence pruning**: replicates the acceptance effect
+  (40→88%) but is a wall-clock wash single-stream on Apple Silicon — verify
+  width is nearly free there; the mechanism pays on batched serving.
+- **Outline-conditioned drafting**: +0.1pt acceptance on prose — no effect.
+- **Thinking spans draft like prose**, not boilerplate — route thinking models
+  to plain AR.
+- **Abstractive compression can be confidently wrong** on multi-fact numeric
+  comparisons; prefer `extractive_relevance` when exact numbers matter — and
+  gold-blind fault-in triggers can't catch it without logprobs.
+
+**Losslessness, honestly**: accelerated output is verified by the exact AR pass.
+Divergences vs token-by-token decoding occur only at floating-point near-ties
+(measured logit gap 0.125/32) where the model is indifferent — documented in
+[`docs/orthrus_phase1_results.md`](docs/orthrus_phase1_results.md).
+
+## Repo layout
+
+```
+src/sclab/                 the package (compressors, runtimes, benchmarks, server)
+src/sclab/runtimes/orthrus_engine.py   instrumented decode loop: proposers,
+                                       scheduler, pruning, router, telemetry
+src/sclab/vendor/orthrus/  Orthrus MLX architecture (MIT, Chien Nguyen)
+docs/                      all findings write-ups (positive AND negative)
+results/                   raw JSONL from every headline benchmark
+data/tasks/                benchmark datasets (short + long-context)
+tests/                     30 tests, no GPU required
+```
+
+## Credits
+
+- [Orthrus](https://github.com/chiennv2000/orthrus) by Chien Nguyen — the
+  dual-view diffusion architecture and pretrained checkpoints (MIT).
+- DeepSeek's DSpark for the confidence-scheduled-verification idea we adapted
+  (and honestly benchmarked) for single-stream Apple Silicon.
+- CopySpec, Draft & Verify, Medusa/EAGLE, and the MTP literature for the
+  speculative-decoding foundations.
+
+MIT licensed. Benchmarks were run on one machine (M4 Max, 64 GB); your numbers
+will vary — the harness exists so you can measure, not trust.

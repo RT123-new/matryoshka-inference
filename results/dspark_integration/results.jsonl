@@ -1,0 +1,21 @@
+{"wl": "code", "config": "ar", "tps": 15.1}
+{"wl": "code", "config": "fixed16", "tps": 27.3, "speedup": 1.81, "acc_rate": 0.223, "acc_pass": 4.3095, "pruned": 0, "ar_steps": 0, "div": 0}
+{"wl": "code", "config": "prune.3", "tps": 15.7, "speedup": 1.04, "acc_rate": 0.767, "acc_pass": 3.8298, "pruned": 517, "ar_steps": 0, "div": 120}
+{"wl": "code", "config": "prune.1", "tps": 11.0, "speedup": 0.73, "acc_rate": 0.632, "acc_pass": 3.9348, "pruned": 453, "ar_steps": 0, "div": 9}
+{"wl": "code", "config": "sched+prune", "tps": 10.9, "speedup": 0.72, "acc_rate": 0.767, "acc_pass": 3.8298, "pruned": 517, "ar_steps": 0, "div": 120}
+{"wl": "json", "config": "ar", "tps": 33.6}
+{"wl": "json", "config": "fixed16", "tps": 69.3, "speedup": 2.06, "acc_rate": 0.719, "acc_pass": 11.3125, "pruned": 0, "ar_steps": 0, "div": 0}
+{"wl": "json", "config": "prune.3", "tps": 74.4, "speedup": 2.22, "acc_rate": 0.882, "acc_pass": 11.3125, "pruned": 42, "ar_steps": 0, "div": 0}
+{"wl": "json", "config": "prune.1", "tps": 75.5, "speedup": 2.25, "acc_rate": 0.841, "acc_pass": 11.3125, "pruned": 33, "ar_steps": 0, "div": 0}
+{"wl": "json", "config": "sched+prune", "tps": 75.5, "speedup": 2.25, "acc_rate": 0.882, "acc_pass": 11.3125, "pruned": 42, "ar_steps": 0, "div": 0}
+{"wl": "reasoning", "config": "ar", "tps": 36.1}
+{"wl": "reasoning", "config": "fixed16", "tps": 42.4, "speedup": 1.17, "acc_rate": 0.402, "acc_pass": 6.7037, "pruned": 0, "ar_steps": 0, "div": 0}
+{"wl": "reasoning", "config": "prune.3", "tps": 39.7, "speedup": 1.1, "acc_rate": 0.877, "acc_pass": 6.0333, "pruned": 250, "ar_steps": 0, "div": 0}
+{"wl": "reasoning", "config": "prune.1", "tps": 20.2, "speedup": 0.56, "acc_rate": 0.796, "acc_pass": 6.4643, "pruned": 205, "ar_steps": 0, "div": 0}
+{"wl": "reasoning", "config": "sched+prune", "tps": 17.2, "speedup": 0.48, "acc_rate": 0.877, "acc_pass": 6.0333, "pruned": 250, "ar_steps": 0, "div": 0}
+{"wl": "prose", "config": "ar", "tps": 13.9}
+{"wl": "prose", "config": "fixed16", "tps": 7.7, "speedup": 0.55, "acc_rate": 0.123, "acc_pass": 2.8421, "pruned": 0, "ar_steps": 0, "div": 37}
+{"wl": "prose", "config": "prune.3", "tps": 10.5, "speedup": 0.75, "acc_rate": 0.7, "acc_pass": 2.5217, "pruned": 590, "ar_steps": 0, "div": 0}
+{"wl": "prose", "config": "prune.1", "tps": 7.6, "speedup": 0.55, "acc_rate": 0.533, "acc_pass": 2.6977, "pruned": 508, "ar_steps": 0, "div": 0}
+{"wl": "prose", "config": "sched+prune", "tps": 7.2, "speedup": 0.52, "acc_rate": 0.7, "acc_pass": 2.5217, "pruned": 590, "ar_steps": 0, "div": 0}
+{"exp": "think_throttle", "ar_s": 11.2, "fixed16_s": 15.13, "sched_s": 30.04, "ar_tok": 400, "fixed16_tok": 401, "sched_tok": 401}

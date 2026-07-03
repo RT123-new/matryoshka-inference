@@ -1,0 +1,17 @@
+Application Configuration Notes
+
+Runtime:
+Python 3.12 is used in production. The API starts with:
+uvicorn app.main:app --host 0.0.0.0 --port 8080
+
+Environment:
+CACHE_TTL_SECONDS=600
+FEATURE_VECTOR_SEARCH=false
+LOG_LEVEL=info
+
+Deployment:
+The readiness probe path is /ready. The liveness probe path is /live. The container exposes port 8080.
+
+Indexing:
+To rebuild the document index, run:
+python -m tools.index --source ./docs --out ./data/index.jsonl

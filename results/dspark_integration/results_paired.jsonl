@@ -1,0 +1,13 @@
+{"wl": "code", "config": "fixed16", "tps": 36.2, "paired_speedup": 0.83, "acc_rate": 0.223, "acc_pass": 4.3095, "pruned": 0, "ar_steps": 0, "local_ar": 43.5}
+{"wl": "code", "config": "prune.3", "tps": 33.1, "paired_speedup": 0.85, "acc_rate": 0.767, "acc_pass": 3.8298, "pruned": 517, "ar_steps": 0, "local_ar": 39.1}
+{"wl": "code", "config": "sched+prune", "tps": 27.5, "paired_speedup": 0.73, "acc_rate": 0.773, "acc_pass": 1.6161, "pruned": 271, "ar_steps": 84, "local_ar": 37.5}
+{"wl": "json", "config": "fixed16", "tps": 66.5, "paired_speedup": 2.23, "acc_rate": 0.719, "acc_pass": 11.3125, "pruned": 0, "ar_steps": 0, "local_ar": 29.9}
+{"wl": "json", "config": "prune.3", "tps": 36.3, "paired_speedup": 2.3, "acc_rate": 0.882, "acc_pass": 11.3125, "pruned": 42, "ar_steps": 0, "local_ar": 15.8}
+{"wl": "json", "config": "sched+prune", "tps": 48.9, "paired_speedup": 1.76, "acc_rate": 0.882, "acc_pass": 11.3125, "pruned": 42, "ar_steps": 0, "local_ar": 27.7}
+{"wl": "reasoning", "config": "fixed16", "tps": 51.0, "paired_speedup": 1.31, "acc_rate": 0.402, "acc_pass": 6.7037, "pruned": 0, "ar_steps": 0, "local_ar": 38.9}
+{"wl": "reasoning", "config": "prune.3", "tps": 46.2, "paired_speedup": 1.22, "acc_rate": 0.877, "acc_pass": 6.0333, "pruned": 250, "ar_steps": 0, "local_ar": 37.9}
+{"wl": "reasoning", "config": "sched+prune", "tps": 40.5, "paired_speedup": 1.07, "acc_rate": 0.885, "acc_pass": 2.2785, "pruned": 187, "ar_steps": 59, "local_ar": 37.9}
+{"wl": "prose", "config": "fixed16", "tps": 22.0, "paired_speedup": 0.56, "acc_rate": 0.123, "acc_pass": 2.8421, "pruned": 0, "ar_steps": 0, "local_ar": 39.7}
+{"wl": "prose", "config": "prune.3", "tps": 19.8, "paired_speedup": 0.5, "acc_rate": 0.7, "acc_pass": 2.5217, "pruned": 590, "ar_steps": 0, "local_ar": 39.6}
+{"wl": "prose", "config": "sched+prune", "tps": 21.4, "paired_speedup": 0.54, "acc_rate": 0.647, "acc_pass": 1.4146, "pruned": 111, "ar_steps": 50, "local_ar": 39.4}
+{"exp": "think_paired", "ar_s": [10.19, 10.16, 10.18], "fixed16_s": 12.69, "sched_s": 11.97}

@@ -1,0 +1,10 @@
+{"task": "rent_001_long", "type": "single_fact", "q_comp": 0.93, "q_raw": 1.0, "q_faultin": 0.93, "t_comp": 11.48, "t_raw": 1.01, "t_faultin": 11.48, "escalated": false, "why": ""}
+{"task": "warranty_001_long", "type": "single_fact", "q_comp": 1.0, "q_raw": 1.0, "q_faultin": 1.0, "t_comp": 0.72, "t_raw": 0.78, "t_faultin": 0.72, "escalated": false, "why": ""}
+{"task": "model_001_long", "type": "single_fact", "q_comp": 1.0, "q_raw": 1.0, "q_faultin": 1.0, "t_comp": 0.55, "t_raw": 0.65, "t_faultin": 0.55, "escalated": false, "why": ""}
+{"task": "deadline_001_long", "type": "single_fact", "q_comp": 1.0, "q_raw": 1.0, "q_faultin": 1.0, "t_comp": 0.71, "t_raw": 0.8, "t_faultin": 0.71, "escalated": false, "why": ""}
+{"task": "fee_001_long", "type": "single_fact", "q_comp": 1.0, "q_raw": 1.0, "q_faultin": 1.0, "t_comp": 0.55, "t_raw": 0.65, "t_faultin": 0.55, "escalated": false, "why": ""}
+{"task": "obligations_001_long", "type": "multi_fact", "q_comp": 0.93, "q_raw": 0.93, "q_faultin": 0.93, "t_comp": 1.13, "t_raw": 1.21, "t_faultin": 1.13, "escalated": false, "why": ""}
+{"task": "cheaper_001_long", "type": "multi_fact", "q_comp": 0.9, "q_raw": 1.0, "q_faultin": 0.9, "t_comp": 1.98, "t_raw": 2.14, "t_faultin": 1.98, "escalated": false, "why": ""}
+{"task": "shipping_001_long", "type": "multi_fact", "q_comp": 0.93, "q_raw": 0.93, "q_faultin": 0.93, "t_comp": 0.98, "t_raw": 1.06, "t_faultin": 0.98, "escalated": false, "why": ""}
+{"task": "slo_001_long", "type": "multi_fact", "q_comp": 0.93, "q_raw": 0.93, "q_faultin": 0.93, "t_comp": 0.94, "t_raw": 1.08, "t_faultin": 0.94, "escalated": false, "why": ""}
+{"task": "renewal_001_long", "type": "multi_fact", "q_comp": 0.93, "q_raw": 0.93, "q_faultin": 0.93, "t_comp": 0.99, "t_raw": 1.1, "t_faultin": 0.99, "escalated": false, "why": ""}

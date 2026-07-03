@@ -1,0 +1,6 @@
+{"exp": "adaptive_tune", "wl": "code", "ar_tps": 52.9, "fixed16_tps": 50.4, "adaptive_tps": 46.1, "adaptive_accpass": 3.93}
+{"exp": "adaptive_tune", "wl": "json", "ar_tps": 52.8, "fixed16_tps": 132.5, "adaptive_tps": 132.6, "adaptive_accpass": 11.31}
+{"exp": "adaptive_tune", "wl": "reasoning", "ar_tps": 52.6, "fixed16_tps": 78.3, "adaptive_tps": 78.4, "adaptive_accpass": 6.7}
+{"exp": "adaptive_tune", "wl": "prose", "ar_tps": 52.5, "fixed16_tps": 33.0, "adaptive_tps": 29.1, "adaptive_accpass": 2.47}
+{"exp": "router", "always_ar_s": 16.13, "always_diff_s": 14.47, "auto_s": 10.89, "routing": [["json", "diffusion", 3.47, 2.02], ["code", "diffusion", 3.51, 1.51], ["reasoning", "diffusion", 2.86, 1.08], ["prose1", "ar", 2.77, 4.6], ["prose2", "ar", 3.52, 5.27]]}
+{"exp": "copy", "diff_tps": 186.5, "copy_tps": 199.0, "diff_mix": {"diffusion": 240}, "copy_mix": {"diffusion": 144, "copy": 96}, "copy_accpass": 12.68}
