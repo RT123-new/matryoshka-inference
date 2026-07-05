@@ -139,7 +139,21 @@ sclab single --runtime ollama --model gemma4:latest \
   --question "$Q" --compressor extractive_relevance
 ```
 
-### 3. Reproduce the findings
+### A/B: measure Matryoshka off vs on, same prompts
+
+```bash
+sclab ab --open                                        # compression A/B on your current Hermes model
+sclab ab --backend orthrus --model orthrus-qwen3-4b --open   # AR-vs-diffusion acceleration A/B
+```
+
+Runs the same diverse prompts twice (baseline vs Matryoshka) with identical
+measurements and writes a side-by-side HTML report (both outputs, tok/s,
+accepted/pass, quality). Findings on the bundled prompts: compression on a stock
+Ollama model is a situational trade (1.13×, some quality loss on multi-fact),
+while **diffusion decoding on an Orthrus model is a near-lossless 1.71× (up to
+2.28×) with 7/8 token-identical outputs** — see [docs/ab_findings.md](docs/ab_findings.md).
+
+### Reproduce the findings
 
 ```bash
 sclab benchmark --runtime orthrus-mlx --model orthrus-qwen3-4b \

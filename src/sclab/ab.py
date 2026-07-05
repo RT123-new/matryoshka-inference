@@ -117,14 +117,85 @@ def run_ab(
             "speedup_total": round(b_total / m_total, 2) if (b_total and m_total) else None,
         })
 
-    meta = {"model": model, "base_url": base_url, "compressor": compressor.name,
+    meta = {"model": model, "endpoint": base_url, "kind": "compression",
+            "setting": f"compressor={compressor.name}",
+            "baseline_label": "Baseline (no Matryoshka)",
+            "matr_label": "Matryoshka ON (compressed prompt)",
             "max_tokens": max_tokens, "num_ctx": num_ctx, "tasks": len(rows)}
+    _write_report(out_dir, meta, rows)
+    return {"meta": meta, "rows": rows, "out": out_dir}
+
+
+def run_ab_orthrus(
+    model: str,
+    dataset: str,
+    out_dir: str,
+    block_size: int = 16,
+    max_tokens: int = 200,
+    max_tasks: Optional[int] = None,
+    progress=lambda s: None,
+) -> dict[str, Any]:
+    """Acceleration A/B on an Orthrus MLX model: plain AR decode (baseline) vs
+    dual-view diffusion decode (Matryoshka on), on the SAME prompt. Diffusion is
+    verified by the exact AR pass, so quality should match — the win is tok/s."""
+    from sclab.runtimes.orthrus_mlx import OrthrusMLXRuntime
+
+    rt = OrthrusMLXRuntime()
+    tasks = load_tasks(dataset, max_tasks)
+
+    def gen(prompt: str, mode: str):
+        opts: dict[str, Any] = {"mode": mode}
+        if mode != "ar":
+            opts["block_size"] = block_size
+        return rt.generate(GenerationRequest(
+            model=model, prompt=prompt, max_tokens=max_tokens,
+            temperature=0.0, runtime_options=opts,
+        ))
+
+    progress("loading Orthrus model (weights)...")
+    gen("Reply with: ready", "ar")
+
+    rows: list[dict[str, Any]] = []
+    for i, t in enumerate(tasks, 1):
+        progress(f"[{i}/{len(tasks)}] {t.id} ({t.type})")
+        prompt = render_prompt("raw", t.document, t.question)
+        base = gen(prompt, "ar")
+        matr = gen(prompt, "diffusion")
+        base_q = score_answer(base.text, t).quality_score if base.text else 0.0
+        matr_q = score_answer(matr.text, t).quality_score if matr.text else 0.0
+        acc = (matr.raw_metadata or {}).get("accepted_tokens_per_verification_pass")
+        b_dec, m_dec = base.decode_tokens_per_s, matr.decode_tokens_per_s
+        rows.append({
+            "id": t.id, "area": t.type, "question": t.question, "gold_answer": t.gold_answer,
+            "baseline": {"prompt_tokens": base.prompt_tokens, "completion_tokens": base.completion_tokens,
+                         "ttft_s": base.time_to_first_token_s, "total_s": base.total_time_s,
+                         "decode_tps": b_dec, "eff_tps": _eff_tps(base.completion_tokens, base.total_time_s),
+                         "quality": round(base_q, 3), "output": base.text},
+            "matryoshka": {"prompt_tokens": matr.prompt_tokens, "completion_tokens": matr.completion_tokens,
+                           "ttft_s": matr.time_to_first_token_s, "total_s": matr.total_time_s,
+                           "decode_tps": m_dec, "eff_tps": _eff_tps(matr.completion_tokens, matr.total_time_s),
+                           "quality": round(matr_q, 3), "output": matr.text,
+                           "accepted_per_pass": round(acc, 2) if acc else None},
+            "speedup_decode": round(m_dec / b_dec, 2) if (b_dec and m_dec) else None,
+            "speedup_total": round(base.total_time_s / matr.total_time_s, 2)
+                             if (base.total_time_s and matr.total_time_s) else None,
+        })
+
+    meta = {"model": model, "endpoint": "local MLX", "kind": "acceleration",
+            "setting": f"diffusion block={block_size}",
+            "baseline_label": "Baseline (plain AR decode)",
+            "matr_label": "Matryoshka ON (diffusion decode)",
+            "max_tokens": max_tokens, "num_ctx": None, "tasks": len(rows)}
+    _write_report(out_dir, meta, rows)
+    return {"meta": meta, "rows": rows, "out": out_dir}
+
+
+def _write_report(out_dir: str, meta: dict, rows: list[dict]) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "results.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
     (out / "report.html").write_text(build_html(meta, rows), encoding="utf-8")
     (out / "report.md").write_text(build_md(meta, rows), encoding="utf-8")
-    return {"meta": meta, "rows": rows, "out": str(out)}
 
 
 def _avg(vals: list[Optional[float]]) -> Optional[float]:
@@ -133,30 +204,32 @@ def _avg(vals: list[Optional[float]]) -> Optional[float]:
 
 
 def build_md(meta: dict, rows: list[dict]) -> str:
-    sp = _avg([r["speedup_total"] for r in rows])
-    cr = _avg([r["compression_ratio"] for r in rows])
+    accel = meta.get("kind") == "acceleration"
+    sp = _avg([(r["speedup_decode"] if accel else r["speedup_total"]) for r in rows])
     bq = _avg([r["baseline"]["quality"] for r in rows])
     mq = _avg([r["matryoshka"]["quality"] for r in rows])
+    metric = "decode tok/s" if accel else "eff tok/s"
     lines = [
-        f"# Matryoshka A/B — {meta['model']}",
+        f"# Matryoshka A/B — {meta['model']} ({meta.get('kind')})",
         "",
-        f"Same model, same prompts, compressor = `{meta['compressor']}`. "
-        f"Baseline = raw prompt; Matryoshka = compressed prompt.",
+        f"Same model, same prompts, {meta.get('setting','')}. "
+        f"Baseline = {meta['baseline_label']}; Matryoshka = {meta['matr_label']}.",
         "",
-        f"- Avg end-to-end speedup: **{sp:.2f}x**" if sp else "- speedup: n/a",
-        f"- Avg prompt size after compression: **{cr*100:.0f}%** of raw" if cr else "",
-        f"- Avg quality: baseline {bq:.3f} vs Matryoshka {mq:.3f}" if (bq is not None) else "",
+        f"- Avg {'decode' if accel else 'end-to-end'} speedup: **{sp:.2f}x**" if sp else "- speedup: n/a",
+        f"- Avg quality: baseline {bq:.3f} vs Matryoshka {mq:.3f}"
+        + ("  (diffusion is lossless vs AR)" if accel else ""),
         "",
-        "| area | prompt tok (base→matr) | total s (base→matr) | eff tok/s (base→matr) | speedup | quality |",
-        "|---|---|---|---|---:|---|",
+        f"| area | {metric} (base→matr) | total s (base→matr) | speedup | quality |",
+        "|---|---|---|---:|---|",
     ]
     for r in rows:
         b, m = r["baseline"], r["matryoshka"]
+        bm = _fmt(b["decode_tps"] if accel else b["eff_tps"])
+        mm = _fmt(m["decode_tps"] if accel else m["eff_tps"])
+        sval = r["speedup_decode"] if accel else r["speedup_total"]
         lines.append(
-            f"| {r['area']} | {b['prompt_tokens']}→{m['prompt_tokens']} | "
-            f"{_fmt(b['total_s'])}→{_fmt(m['total_s'])} | "
-            f"{_fmt(b['eff_tps'])}→{_fmt(m['eff_tps'])} | "
-            f"{r['speedup_total'] or '—'}x | {b['quality']}→{m['quality']} |"
+            f"| {r['area']} | {bm}→{mm} | {_fmt(b['total_s'])}→{_fmt(m['total_s'])} | "
+            f"{sval or '—'}x | {b['quality']}→{m['quality']} |"
         )
     return "\n".join(l for l in lines if l is not None)
 
@@ -166,52 +239,69 @@ def _fmt(v) -> str:
 
 
 def build_html(meta: dict, rows: list[dict]) -> str:
-    sp = _avg([r["speedup_total"] for r in rows]) or 0
-    cr = _avg([r["compression_ratio"] for r in rows]) or 1
+    accel = meta.get("kind") == "acceleration"
+    sp = _avg([(r["speedup_decode"] if accel else r["speedup_total"]) for r in rows]) or 0
     bq = _avg([r["baseline"]["quality"] for r in rows]) or 0
     mq = _avg([r["matryoshka"]["quality"] for r in rows]) or 0
+    cr = _avg([r.get("compression_ratio") for r in rows]) or 1
+    acc = _avg([r["matryoshka"].get("accepted_per_pass") for r in rows])
 
     def esc(s):
         return html.escape(str(s or ""))
 
+    def metric_row(d, is_matr):
+        cells = [f"<span>prompt <b>{esc(d['prompt_tokens'])}</b> tok</span>",
+                 f"<span>total <b>{_fmt(d['total_s'])}</b> s</span>",
+                 f"<span>decode <b>{_fmt(d['decode_tps'])}</b> tok/s</span>"]
+        if not accel:
+            cells.append(f"<span>end-to-end <b>{_fmt(d['eff_tps'])}</b> tok/s</span>")
+        if accel and is_matr and d.get("accepted_per_pass"):
+            cells.append(f"<span>accepted/pass <b>{d['accepted_per_pass']}</b></span>")
+        cells.append(f"<span class='q'>quality <b>{d['quality']}</b></span>")
+        return "".join(cells)
+
     cards = []
     for r in rows:
         b, m = r["baseline"], r["matryoshka"]
+        if accel:
+            cmp = (f"decode {_fmt(b['decode_tps'])} → {_fmt(m['decode_tps'])} tok/s · "
+                   + (f"{m['accepted_per_pass']} accepted/pass · " if m.get("accepted_per_pass") else "")
+                   + f"<b>{r['speedup_decode'] or '—'}× faster</b> · "
+                   f"quality {b['quality']} → {m['quality']} (lossless)")
+        else:
+            cmp = (f"prompt {esc(b['prompt_tokens'])} → {esc(m['prompt_tokens'])} tok "
+                   f"({(r.get('compression_ratio') or 1)*100:.0f}% of raw) · "
+                   f"<b>{r['speedup_total'] or '—'}× faster</b> end-to-end · "
+                   f"quality {b['quality']} → {m['quality']}")
         cards.append(f"""
         <div class="card">
           <div class="qhead"><span class="chip">{esc(r['area'])}</span> {esc(r['question'])}</div>
           <div class="gold">Gold answer: {esc(r['gold_answer'])}</div>
           <div class="cols">
-            <div class="col base">
-              <div class="ctitle">Baseline (no Matryoshka)</div>
-              <div class="metrics">
-                <span>prompt <b>{esc(b['prompt_tokens'])}</b> tok</span>
-                <span>total <b>{_fmt(b['total_s'])}</b> s</span>
-                <span>decode <b>{_fmt(b['decode_tps'])}</b> tok/s</span>
-                <span>end-to-end <b>{_fmt(b['eff_tps'])}</b> tok/s</span>
-                <span class="q">quality <b>{b['quality']}</b></span>
-              </div>
-              <div class="out">{esc(b['output'])}</div>
-            </div>
-            <div class="col matr">
-              <div class="ctitle">Matryoshka ON (compressed prompt)</div>
-              <div class="metrics">
-                <span>prompt <b>{esc(m['prompt_tokens'])}</b> tok</span>
-                <span>total <b>{_fmt(m['total_s'])}</b> s</span>
-                <span>decode <b>{_fmt(m['decode_tps'])}</b> tok/s</span>
-                <span>end-to-end <b>{_fmt(m['eff_tps'])}</b> tok/s</span>
-                <span class="q">quality <b>{m['quality']}</b></span>
-              </div>
-              <div class="out">{esc(m['output'])}</div>
-            </div>
+            <div class="col base"><div class="ctitle">{esc(meta['baseline_label'])}</div>
+              <div class="metrics">{metric_row(b, False)}</div>
+              <div class="out">{esc(b['output'])}</div></div>
+            <div class="col matr"><div class="ctitle">{esc(meta['matr_label'])}</div>
+              <div class="metrics">{metric_row(m, True)}</div>
+              <div class="out">{esc(m['output'])}</div></div>
           </div>
-          <div class="cmp">
-            prompt {esc(b['prompt_tokens'])} → {esc(m['prompt_tokens'])} tok
-            ({(r['compression_ratio'] or 1)*100:.0f}% of raw) ·
-            <b>{r['speedup_total'] or '—'}× faster</b> end-to-end ·
-            quality {b['quality']} → {m['quality']}
-          </div>
+          <div class="cmp">{cmp}</div>
         </div>""")
+
+    if accel:
+        kpi2 = f"<div class='kpi'><div class='l'>Avg accepted / pass</div><div class='v'>{acc:.1f}</div></div>" if acc else "<div class='kpi'><div class='l'>Decode speedup</div><div class='v'>{:.2f}×</div></div>".format(sp)
+        speed_label = "Avg speedup (decode)"
+        note = ("\"Matryoshka on\" here = dual-view diffusion decoding on the same Orthrus MLX "
+                "model. Every drafted block is verified by the exact autoregressive pass, so the "
+                "output is lossless vs plain AR — quality is unchanged and the win is pure tok/s. "
+                "'accepted/pass' is how many tokens each expensive model pass emits (AR baseline = 1.0).")
+    else:
+        kpi2 = f"<div class='kpi'><div class='l'>Avg prompt size</div><div class='v'>{cr*100:.0f}%</div></div>"
+        speed_label = "Avg speedup (end-to-end)"
+        note = ("\"Matryoshka on\" here = semantic prompt compression (less prefill), because this "
+                "model is a stock GGUF. Diffusion acceleration applies only to Orthrus MLX models "
+                "(see the acceleration report). Decode tok/s is ~unchanged by compression; the win "
+                "shows in prompt size and total time.")
 
     return f"""<!doctype html><html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -237,14 +327,14 @@ def build_html(meta: dict, rows: list[dict]) -> str:
  .out{{white-space:pre-wrap;font-size:12.5px;background:#0a0e14;border:1px solid #1e2733;border-radius:8px;padding:10px;max-height:220px;overflow:auto}}
  .cmp{{margin-top:12px;font-size:12.5px;color:#7d8896;border-top:1px solid #1e2733;padding-top:10px}} .cmp b{{color:#2dd4bf}}
 </style></head><body><div class="wrap">
- <h1>Matryoshka A/B comparison</h1>
- <div class="sub">Model <b>{esc(meta['model'])}</b> · endpoint {esc(meta['base_url'])} · compressor <b>{esc(meta['compressor'])}</b> · {meta['tasks']} prompts · same model &amp; settings both sides. Baseline = raw prompt, Matryoshka = compressed prompt.</div>
+ <h1>Matryoshka A/B — {esc(meta.get('kind','').title())}</h1>
+ <div class="sub">Model <b>{esc(meta['model'])}</b> · {esc(meta['endpoint'])} · {esc(meta['setting'])} · {meta['tasks']} prompts · same model &amp; settings both sides. Baseline = {esc(meta['baseline_label'])}, Matryoshka = {esc(meta['matr_label'])}.</div>
  <div class="kpis">
-   <div class="kpi"><div class="l">Avg speedup (end-to-end)</div><div class="v">{sp:.2f}×</div></div>
-   <div class="kpi"><div class="l">Avg prompt size</div><div class="v">{cr*100:.0f}%</div></div>
+   <div class="kpi"><div class="l">{speed_label}</div><div class="v">{sp:.2f}×</div></div>
+   {kpi2}
    <div class="kpi"><div class="l">Quality baseline</div><div class="v" style="color:#f5a623">{bq:.2f}</div></div>
    <div class="kpi"><div class="l">Quality Matryoshka</div><div class="v">{mq:.2f}</div></div>
  </div>
  {''.join(cards)}
- <div class="sub" style="margin-top:8px">Note: this model is a stock Ollama GGUF, so "Matryoshka on" = semantic prompt compression (less prefill). Diffusion acceleration applies only to Orthrus MLX checkpoints. Decode tok/s is roughly unchanged by compression; the win shows in prompt size, time-to-first-token and total time — captured here as end-to-end tok/s and speedup.</div>
+ <div class="sub" style="margin-top:8px">Note: {note}</div>
 </div></body></html>"""

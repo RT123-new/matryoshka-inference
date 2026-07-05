@@ -120,7 +120,10 @@ def build_parser() -> argparse.ArgumentParser:
         "ab", help="A/B: baseline vs Matryoshka on the same model + prompts (HTML report)")
     ab.add_argument("--dataset", default="data/tasks/diverse_ab.jsonl")
     ab.add_argument("--model", default=None, help="Defaults to the current Hermes model")
+    ab.add_argument("--backend", default="auto", choices=["auto", "ollama", "orthrus"],
+                    help="ollama = compression A/B; orthrus = AR-vs-diffusion acceleration A/B")
     ab.add_argument("--base-url", default=None, help="Ollama base URL (defaults to Hermes' setting)")
+    ab.add_argument("--block-size", type=int, default=16, help="Diffusion block size (orthrus backend)")
     ab.add_argument("--compressor", default="extractive_relevance")
     ab.add_argument("--max-tokens", type=int, default=220)
     ab.add_argument("--max-tasks", type=int, default=None)
@@ -322,26 +325,42 @@ def cmd_hermes_config(args: argparse.Namespace) -> int:
 
 
 def cmd_ab(args: argparse.Namespace) -> int:
-    from sclab.ab import read_hermes_model, run_ab
+    from sclab.ab import read_hermes_model, run_ab, run_ab_orthrus
+    from sclab.runtimes.orthrus_mlx import MODEL_ALIASES
 
     h_model, h_base, h_ctx = read_hermes_model()
     model = args.model or h_model
-    base_url = args.base_url or h_base or "http://127.0.0.1:11434"
-    num_ctx = args.num_ctx if args.num_ctx is not None else h_ctx
     if not model:
         raise SystemExit("No model given and none found in Hermes config. Pass --model.")
+    backend = args.backend
+    if backend == "auto":
+        backend = "orthrus" if (model.lower() in MODEL_ALIASES or "orthrus" in model.lower()) else "ollama"
     out = args.out or f"runs/ab_{model.replace(':', '_').replace('/', '_')}"
-    print(f"A/B on model '{model}' via {base_url} (num_ctx={num_ctx}), compressor={args.compressor}")
-    result = run_ab(
-        model=model, dataset=args.dataset, out_dir=out, base_url=base_url,
-        compressor_name=args.compressor, max_tokens=args.max_tokens,
-        max_tasks=args.max_tasks, num_ctx=num_ctx, progress=lambda s: print("  " + s),
-    )
-    rows = result["rows"]
+
     import statistics as st
-    sp = st.mean([r["speedup_total"] for r in rows if r["speedup_total"]]) if rows else 0
+    if backend == "orthrus":
+        print(f"Acceleration A/B on Orthrus model '{model}' (AR vs diffusion, block={args.block_size})")
+        result = run_ab_orthrus(
+            model=model, dataset=args.dataset, out_dir=out, block_size=args.block_size,
+            max_tokens=args.max_tokens, max_tasks=args.max_tasks, progress=lambda s: print("  " + s),
+        )
+        rows = result["rows"]
+        sp = st.mean([r["speedup_decode"] for r in rows if r["speedup_decode"]]) if rows else 0
+        label = "decode speedup"
+    else:
+        base_url = args.base_url or h_base or "http://127.0.0.1:11434"
+        num_ctx = args.num_ctx if args.num_ctx is not None else h_ctx
+        print(f"Compression A/B on '{model}' via {base_url} (num_ctx={num_ctx}), compressor={args.compressor}")
+        result = run_ab(
+            model=model, dataset=args.dataset, out_dir=out, base_url=base_url,
+            compressor_name=args.compressor, max_tokens=args.max_tokens,
+            max_tasks=args.max_tasks, num_ctx=num_ctx, progress=lambda s: print("  " + s),
+        )
+        rows = result["rows"]
+        sp = st.mean([r["speedup_total"] for r in rows if r["speedup_total"]]) if rows else 0
+        label = "end-to-end speedup"
     report = Path(out) / "report.html"
-    print(f"\nAvg end-to-end speedup: {sp:.2f}x  ·  report: {report.resolve()}")
+    print(f"\nAvg {label}: {sp:.2f}x  ·  report: {report.resolve()}")
     if args.open_report:
         import subprocess
         subprocess.run(["open", str(report)], check=False)
