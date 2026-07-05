@@ -116,6 +116,19 @@ def build_parser() -> argparse.ArgumentParser:
     hcfg.add_argument("--model", default="orthrus-qwen3-4b")
     hcfg.set_defaults(func=cmd_hermes_config)
 
+    ab = subparsers.add_parser(
+        "ab", help="A/B: baseline vs Matryoshka on the same model + prompts (HTML report)")
+    ab.add_argument("--dataset", default="data/tasks/diverse_ab.jsonl")
+    ab.add_argument("--model", default=None, help="Defaults to the current Hermes model")
+    ab.add_argument("--base-url", default=None, help="Ollama base URL (defaults to Hermes' setting)")
+    ab.add_argument("--compressor", default="extractive_relevance")
+    ab.add_argument("--max-tokens", type=int, default=220)
+    ab.add_argument("--max-tasks", type=int, default=None)
+    ab.add_argument("--num-ctx", type=int, default=None, help="Override context size (default: Hermes' setting)")
+    ab.add_argument("--out", default=None)
+    ab.add_argument("--open", dest="open_report", action="store_true", help="Open the HTML report when done")
+    ab.set_defaults(func=cmd_ab)
+
     hconn = subparsers.add_parser(
         "hermes-connect",
         help="Transparently route Hermes through the dashboard proxy (reversible)")
@@ -305,6 +318,33 @@ def cmd_hermes_config(args: argparse.Namespace) -> int:
     print("    api_key: local")
     print(f"    model: {args.model}")
     print(f"\nDashboard while you chat:  http://{args.host}:{args.port}/dashboard")
+    return 0
+
+
+def cmd_ab(args: argparse.Namespace) -> int:
+    from sclab.ab import read_hermes_model, run_ab
+
+    h_model, h_base, h_ctx = read_hermes_model()
+    model = args.model or h_model
+    base_url = args.base_url or h_base or "http://127.0.0.1:11434"
+    num_ctx = args.num_ctx if args.num_ctx is not None else h_ctx
+    if not model:
+        raise SystemExit("No model given and none found in Hermes config. Pass --model.")
+    out = args.out or f"runs/ab_{model.replace(':', '_').replace('/', '_')}"
+    print(f"A/B on model '{model}' via {base_url} (num_ctx={num_ctx}), compressor={args.compressor}")
+    result = run_ab(
+        model=model, dataset=args.dataset, out_dir=out, base_url=base_url,
+        compressor_name=args.compressor, max_tokens=args.max_tokens,
+        max_tasks=args.max_tasks, num_ctx=num_ctx, progress=lambda s: print("  " + s),
+    )
+    rows = result["rows"]
+    import statistics as st
+    sp = st.mean([r["speedup_total"] for r in rows if r["speedup_total"]]) if rows else 0
+    report = Path(out) / "report.html"
+    print(f"\nAvg end-to-end speedup: {sp:.2f}x  ·  report: {report.resolve()}")
+    if args.open_report:
+        import subprocess
+        subprocess.run(["open", str(report)], check=False)
     return 0
 
 

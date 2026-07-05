@@ -33,17 +33,20 @@ class OllamaRuntime(ApproxTokenCounterMixin):
 
     def generate(self, request: GenerationRequest) -> GenerationResult:
         think = request.runtime_options.get("think", False)
+        options = {
+            "num_predict": request.max_tokens,
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+            "seed": request.seed,
+        }
+        # Allow callers to match a client's exact options (e.g. Hermes' num_ctx).
+        options.update(request.runtime_options.get("options") or {})
         payload = {
             "model": request.model,
             "prompt": request.prompt,
             "stream": True,
             "think": think,
-            "options": {
-                "num_predict": request.max_tokens,
-                "temperature": request.temperature,
-                "top_p": request.top_p,
-                "seed": request.seed,
-            },
+            "options": options,
         }
         start = time.perf_counter()
         first_token_s: float | None = None
