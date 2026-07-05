@@ -62,11 +62,20 @@ Orthrus checkpoints download automatically from Hugging Face on first use
 
 ## Quickstart
 
-### 1. Accelerated OpenAI-compatible server (MLX, Apple Silicon)
+### 1. Accelerated OpenAI-compatible server + live dashboard (MLX, Apple Silicon)
 
 ```bash
 sclab serve --model orthrus-qwen3-4b --port 8977
 ```
+
+Open **http://127.0.0.1:8977/dashboard** — a real-time view of the engine
+working: a live pipeline animation (Prompt → Router → Draft/Verify → Stream),
+tokens/sec, accepted-tokens-per-verification-pass, draft acceptance %, live
+speedup vs AR, a throughput chart, a token-source breakdown (diffusion / copy /
+AR), and a request feed. Every request from any client (including Hermes) lights
+it up. It also has a built-in **playground** so you can watch it work without
+any other app. The dashboard is self-contained (no external assets) and safe to
+embed in a desktop webview.
 
 Then from anything that speaks the OpenAI API:
 
@@ -127,6 +136,13 @@ Nous Research's Hermes desktop app connects to any OpenAI-compatible endpoint:
 
 Hermes' `/models` probe is supported, so the model appears in its picker.
 Config lands in `~/.hermes/config.yaml` if you prefer editing it directly.
+
+**Watch it while you chat:** keep `http://127.0.0.1:8977/dashboard` open in a
+browser tab (or a side webview) next to Hermes — as you chat, each turn flows
+through the server and the dashboard's pipeline, tok/s, and acceptance metrics
+update live. This is the "shows exactly how it works" view: you can see which
+prompts route to diffusion vs AR and how many tokens each verification pass
+accepts, in real time.
 
 ### Ollama
 

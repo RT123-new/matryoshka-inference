@@ -9,3 +9,8 @@ build/
 .DS_Store
 runs/
 hardware.json
+run_dashboard.sh
+.claude/
+run_dashboard.sh
+_preview_launch.py
+.claude/

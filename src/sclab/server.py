@@ -29,9 +29,12 @@ from sclab.runtimes.orthrus_engine import (
     route_mode,
 )
 from sclab.runtimes.orthrus_mlx import MODEL_ALIASES, _resolve_repo
+from sclab.telemetry import TelemetryStore
+from sclab.dashboard import DASHBOARD_HTML
 
 _STATE: dict[str, Any] = {"model": None, "tokenizer": None, "repo": None, "served_name": None,
                           "mode": "auto", "block_size": 16, "backoff": 96, "lock": None}
+_TELEMETRY = TelemetryStore()
 
 
 def _load(repo_id: str) -> None:
@@ -86,14 +89,31 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _html(self, body: str) -> None:
+        data = body.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
-        if self.path.rstrip("/") in ("/v1/models", "/models"):
+        path = self.path.split("?")[0].rstrip("/")
+        if path in ("/v1/models", "/models"):
             name = _STATE["served_name"] or _STATE["repo"]
             self._json(200, {"object": "list", "data": [
                 {"id": name, "object": "model", "created": int(time.time()), "owned_by": "local"}
             ]})
-        elif self.path in ("/", "/health"):
-            self._json(200, {"status": "ok", "model": _STATE["repo"], "mode": _STATE["mode"]})
+        elif path in ("/dashboard", "/ui"):
+            self._html(DASHBOARD_HTML)
+        elif path in ("/dashboard/stats", "/stats"):
+            snap = _TELEMETRY.snapshot()
+            snap["server"] = {"model": _STATE["served_name"] or _STATE["repo"],
+                              "mode": _STATE["mode"], "block_size": _STATE["block_size"]}
+            self._json(200, snap)
+        elif path in ("", "/health"):
+            self._json(200, {"status": "ok", "model": _STATE["repo"], "mode": _STATE["mode"],
+                             "dashboard": "/dashboard"})
         else:
             self._json(404, {"error": {"message": f"unknown path {self.path}"}})
 
@@ -118,12 +138,15 @@ class _Handler(BaseHTTPRequestHandler):
         name = _STATE["served_name"] or _STATE["repo"]
         rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
+        _TELEMETRY.start(rid, mode, user_text)
 
         if not stream:
             out: list[int] = []
             telemetry = None
             for t, telemetry in gen:
                 out.append(t)
+                _TELEMETRY.tick(telemetry)
+            _TELEMETRY.finish(telemetry, len(prompt_ids))
             text = tok.decode(out)
             if text.endswith(tok.eos_token or ""):
                 text = text[: -len(tok.eos_token)]
@@ -149,12 +172,14 @@ class _Handler(BaseHTTPRequestHandler):
                        "model": name, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
             return f"data: {json.dumps(payload)}\n\n".encode()
 
+        telemetry = None
         try:
             self.wfile.write(chunk({"role": "assistant", "content": ""}))
             # Decode incrementally: emit text as soon as it detokenizes cleanly.
             pending: list[int] = []
             eos_id = tok.eos_token_id
-            for t, _tel in gen:
+            for t, telemetry in gen:
+                _TELEMETRY.tick(telemetry)
                 if t == eos_id:
                     break
                 pending.append(t)
@@ -172,6 +197,8 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass  # client hung up mid-stream
+        finally:
+            _TELEMETRY.finish(telemetry, len(prompt_ids))
 
 
 def serve(model: str, host: str = "127.0.0.1", port: int = 8977,
