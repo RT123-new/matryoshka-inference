@@ -102,7 +102,12 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0].rstrip("/")
         if path in ("/v1/models", "/models"):
-            name = _STATE["served_name"] or _STATE["repo"]
+            if _STATE["backend"] == "proxy":
+                upstream_models = _proxy.list_models(_STATE["upstream"], _STATE["api_key"])
+                if upstream_models is not None:
+                    self._json(200, upstream_models)
+                    return
+            name = _STATE["served_name"] or _STATE["repo"] or _STATE["model"]
             self._json(200, {"object": "list", "data": [
                 {"id": name, "object": "model", "created": int(time.time()), "owned_by": "local"}
             ]})
@@ -128,56 +133,46 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
 
-    def _handle_proxy(self, messages, max_tokens, temperature, stream):
-        name = _STATE["served_name"] or _STATE["model"]
+    def _handle_proxy(self, body: dict):
+        """Faithful pass-through: forward the client's full request to the
+        upstream and relay the response verbatim (so tools/tool_calls survive),
+        observing the stream only for telemetry."""
         rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        created = int(time.time())
-        user_text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+        messages = body.get("messages") or []
+        user_text = " ".join(
+            m.get("content", "") for m in messages
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+        )
+        fwd = dict(body)
+        fwd["model"] = body.get("model") or _STATE["model"]  # transparent: keep client's model
         _TELEMETRY.start(rid, "proxy", user_text)
-        events = _proxy.stream_chat(_STATE["upstream"], _STATE["model"], messages,
-                                    max_tokens, temperature, _STATE["api_key"])
 
-        def chunk(delta, finish=None):
-            payload = {"id": rid, "object": "chat.completion.chunk", "created": created,
-                       "model": name, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
-            return f"data: {json.dumps(payload)}\n\n".encode()
-
-        if stream:
+        if body.get("stream"):
             self._sse_open()
             try:
-                self.wfile.write(chunk({"role": "assistant", "content": ""}))
-                for kind, data in events:
-                    if kind == "delta":
-                        _TELEMETRY.tick(None)
-                        self.wfile.write(chunk({"content": data})); self.wfile.flush()
+                for kind, data in _proxy.forward_stream(_STATE["upstream"], _STATE["api_key"], fwd):
+                    if kind == "raw":
+                        self.wfile.write((data + "\n").encode())
+                        if data == "":
+                            self.wfile.flush()
+                    elif kind == "tokens":
+                        for _ in range(data):
+                            _TELEMETRY.tick(None)
                     elif kind == "error":
-                        self.wfile.write(chunk({"content": f"\n[proxy error: {data}]"})); self.wfile.flush()
-                self.wfile.write(chunk({}, finish="stop"))
-                self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
+                        self.wfile.write(f"data: {json.dumps({'error': {'message': data}})}\n\n".encode())
+                        self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
             finally:
                 _TELEMETRY.finish(None, 0)
             return
 
-        parts, err = [], None
-        for kind, data in events:
-            if kind == "delta":
-                parts.append(data); _TELEMETRY.tick(None)
-            elif kind == "error":
-                err = data
+        status, obj = _proxy.forward_once(_STATE["upstream"], _STATE["api_key"], fwd)
+        n = int(((obj.get("usage") or {}).get("completion_tokens")) or 0)
+        if n:
+            _TELEMETRY.set_tokens(n)
         _TELEMETRY.finish(None, 0)
-        if err and not parts:
-            self._json(502, {"error": {"message": f"upstream error: {err}"}})
-            return
-        text = "".join(parts)
-        self._json(200, {
-            "id": rid, "object": "chat.completion", "created": created, "model": name,
-            "choices": [{"index": 0, "finish_reason": "stop",
-                         "message": {"role": "assistant", "content": text}}],
-            "usage": {"prompt_tokens": None, "completion_tokens": len(parts), "total_tokens": None},
-            "sclab": {"decode_mode": "proxy", "upstream_model": _STATE["model"]},
-        })
+        self._json(status, obj)
 
     def do_POST(self):
         if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
@@ -195,7 +190,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if _STATE["backend"] == "proxy":
-            self._handle_proxy(messages, max_tokens, temperature, stream)
+            self._handle_proxy(req)
             return
 
         try:

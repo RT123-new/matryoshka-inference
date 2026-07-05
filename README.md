@@ -153,20 +153,37 @@ Every run writes raw JSONL + a Markdown report, always against a raw baseline.
 
 ## Using it with popular tools
 
-### Hermes Agent (desktop)
+### Hermes Agent (desktop) — verified
 
-Nous Research's Hermes desktop app connects to any OpenAI-compatible endpoint.
-Run `sclab hermes-config` to print the exact values to paste, then:
+Hermes talks to a local model via an OpenAI-compatible base URL (its default is
+Ollama at `http://127.0.0.1:11434/v1`). The cleanest integration is to slot the
+**transparent proxy** between Hermes and its existing endpoint — Hermes keeps
+using the exact same model, and every agent turn (chat, tool calls, title
+generation) shows up in the dashboard. One command does it:
 
-1. `sclab up` (or `sclab serve --model orthrus-qwen3-4b --port 8977`)
-2. In Hermes' setup wizard (or Settings → Providers), choose **Custom
-   OpenAI-compatible endpoint**.
-3. Base URL: `http://127.0.0.1:8977/v1` · API key: anything (not checked) ·
-   Model: the name you served (`orthrus-qwen3-4b`, `gemma4:latest`, …).
+```bash
+sclab hermes-connect          # repoints Hermes' base_url at the proxy (backs up config)
+# it prints the proxy command to run, e.g.:
+sclab serve --backend proxy --upstream http://127.0.0.1:11434/v1 --port 8977 --open
+# then fully quit & reopen Hermes. Disconnect anytime:
+sclab hermes-connect --revert  # restores the original config; restart Hermes
+```
 
-> Note: Hermes has no plugin API to embed a custom panel *inside* its window, so
-> the dashboard runs as its own browser tab. `sclab up` opens it for you; keep it
-> beside Hermes and it updates live as you chat.
+That's it — chat in Hermes and watch `http://127.0.0.1:8977/dashboard` light up
+in real time. Tool calls and streaming pass through untouched (the proxy relays
+the upstream response verbatim). **This was tested end-to-end** against Hermes
+v0.18 driving Ollama's Ornith-1.0-35B: the dashboard captured each turn at the
+model's real ~71 tok/s.
+
+> Keep the proxy running while connected — if it stops, Hermes can't reach the
+> endpoint until you `--revert`. Hermes has no plugin API to embed a panel inside
+> its own window, so the dashboard is its own browser tab (`--open` launches it).
+
+Prefer the accelerated Orthrus model in Hermes instead of proxying? Point
+`hermes-connect` at an Orthrus server (`sclab serve --model orthrus-qwen3-4b`)
+and set Hermes' model to `orthrus-qwen3-4b` — you then get the acceleration
+metrics too. Note a 1.7–4B model is a weak *agent*; the transparent proxy in
+front of your usual model is the better everyday setup.
 
 Hermes' `/models` probe is supported, so the model appears in its picker.
 Config lands in `~/.hermes/config.yaml` if you prefer editing it directly.

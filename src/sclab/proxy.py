@@ -5,9 +5,10 @@ Forwards chat completions to any OpenAI-compatible upstream (Ollama at
 streams the tokens back, so the live dashboard reports real throughput for
 *whatever* model is running — not just the Orthrus MLX checkpoints.
 
-We always stream from the upstream (even when the client wants a single
-response) so per-token telemetry is accurate; non-streaming clients get the
-aggregated result.
+The proxy is **faithful**: it forwards the client's full request body (tools,
+tool_choice, response_format, stop, seed, …) and passes the upstream's response
+through verbatim — so agent features like tool calling survive untouched. It
+only observes the stream for telemetry; it never rewrites it.
 """
 
 from __future__ import annotations
@@ -31,54 +32,83 @@ def discover_ollama_model(base_url: str = "http://localhost:11434") -> Optional[
     return None
 
 
-def stream_chat(
-    upstream: str,
-    model: str,
-    messages: list[dict],
-    max_tokens: int,
-    temperature: float,
-    api_key: str = "",
-    timeout: int = 600,
-) -> Iterator[tuple[str, Any]]:
-    """Yield ``(kind, data)`` events from the upstream stream.
+def list_models(upstream: str, api_key: str, timeout: int = 5) -> Optional[dict]:
+    """Return the upstream's /v1/models response verbatim, or None on failure."""
+    try:
+        r = requests.get(upstream.rstrip("/") + "/models", headers=_headers(api_key), timeout=timeout)
+        if r.ok:
+            return r.json()
+    except (requests.RequestException, ValueError):
+        pass
+    return None
 
-    kind is "delta" (data = text piece) or "usage" (data = usage dict) or
-    "error" (data = message). Always finishes cleanly.
+
+def _headers(api_key: str) -> dict:
+    h = {"Content-Type": "application/json"}
+    if api_key:
+        h["Authorization"] = f"Bearer {api_key}"
+    return h
+
+
+def count_delta_tokens(obj: dict) -> int:
+    """How many token-ish pieces a streamed chunk carries (content or tool args)."""
+    n = 0
+    for ch in obj.get("choices") or []:
+        delta = ch.get("delta") or {}
+        if delta.get("content"):
+            n += 1
+        for tc in delta.get("tool_calls") or []:
+            if (tc.get("function") or {}).get("arguments"):
+                n += 1
+    return n
+
+
+def forward_stream(upstream: str, api_key: str, body: dict, timeout: int = 600
+                   ) -> Iterator[tuple[str, Any]]:
+    """Stream from the upstream, yielding events for the server to relay + count.
+
+    Yields:
+      ("raw", line)   - a verbatim SSE data line to write straight to the client
+      ("tokens", n)   - token count parsed from that line (for telemetry)
+      ("error", msg)  - upstream failure
+    The full client body is forwarded; only stream flags are forced on.
     """
     url = upstream.rstrip("/") + "/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": True,
-        # ask upstreams that support it to include usage in the stream
-        "stream_options": {"include_usage": True},
-    }
+    payload = dict(body)
+    payload["stream"] = True
+    payload.setdefault("stream_options", {"include_usage": True})
     try:
-        with requests.post(url, json=payload, headers=headers, stream=True, timeout=timeout) as resp:
+        with requests.post(url, json=payload, headers=_headers(api_key),
+                           stream=True, timeout=timeout) as resp:
             if not resp.ok:
-                yield "error", f"upstream {resp.status_code}: {resp.text[:200]}"
+                yield "error", f"upstream {resp.status_code}: {resp.text[:300]}"
                 return
             for raw in resp.iter_lines(decode_unicode=True):
-                if not raw or not raw.startswith("data:"):
+                if raw is None:
                     continue
-                data = raw[5:].strip()
-                if data == "[DONE]":
-                    return
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("usage"):
-                    yield "usage", obj["usage"]
-                choices = obj.get("choices") or []
-                if choices:
-                    delta = (choices[0].get("delta") or {}).get("content")
-                    if delta:
-                        yield "delta", delta
+                yield "raw", raw
+                if raw.startswith("data:"):
+                    data = raw[5:].strip()
+                    if data and data != "[DONE]":
+                        try:
+                            yield "tokens", count_delta_tokens(json.loads(data))
+                        except json.JSONDecodeError:
+                            pass
     except requests.RequestException as exc:
         yield "error", str(exc)
+
+
+def forward_once(upstream: str, api_key: str, body: dict, timeout: int = 600
+                 ) -> tuple[int, dict]:
+    """Non-streaming forward: return (status_code, json_body) verbatim."""
+    url = upstream.rstrip("/") + "/chat/completions"
+    payload = dict(body)
+    payload["stream"] = False
+    try:
+        resp = requests.post(url, json=payload, headers=_headers(api_key), timeout=timeout)
+        try:
+            return resp.status_code, resp.json()
+        except ValueError:
+            return resp.status_code, {"error": {"message": resp.text[:300]}}
+    except requests.RequestException as exc:
+        return 502, {"error": {"message": str(exc)}}

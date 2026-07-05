@@ -76,6 +76,12 @@ class TelemetryStore:
                 lv.acceptance_rate = telemetry.draft_acceptance_rate
             self._spark.append(round(lv.tok_s(), 1))
 
+    def set_tokens(self, n: int) -> None:
+        """Record a whole non-streaming response's token count at once."""
+        with self._lock:
+            self._live.tokens = n
+            self._spark.append(round(self._live.tok_s(), 1))
+
     def finish(self, telemetry: Optional[Any], prompt_tokens: int) -> None:
         with self._lock:
             lv = self._live

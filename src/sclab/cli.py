@@ -116,6 +116,14 @@ def build_parser() -> argparse.ArgumentParser:
     hcfg.add_argument("--model", default="orthrus-qwen3-4b")
     hcfg.set_defaults(func=cmd_hermes_config)
 
+    hconn = subparsers.add_parser(
+        "hermes-connect",
+        help="Transparently route Hermes through the dashboard proxy (reversible)")
+    hconn.add_argument("--port", type=int, default=8977, help="Port the proxy will listen on")
+    hconn.add_argument("--config", default="~/.hermes/config.yaml")
+    hconn.add_argument("--revert", action="store_true", help="Restore Hermes' original config")
+    hconn.set_defaults(func=cmd_hermes_connect)
+
     return parser
 
 
@@ -297,6 +305,54 @@ def cmd_hermes_config(args: argparse.Namespace) -> int:
     print("    api_key: local")
     print(f"    model: {args.model}")
     print(f"\nDashboard while you chat:  http://{args.host}:{args.port}/dashboard")
+    return 0
+
+
+def cmd_hermes_connect(args: argparse.Namespace) -> int:
+    """Repoint Hermes' model base_url at the local proxy so every chat turn is
+    observed by the dashboard — without changing the model Hermes uses."""
+    import re
+    from pathlib import Path
+
+    cfg = Path(args.config).expanduser()
+    if not cfg.exists():
+        raise SystemExit(f"Hermes config not found at {cfg}. Is Hermes desktop installed?")
+    bak = cfg.with_name(cfg.name + ".matryoshka-bak")
+    proxy_url = f"http://127.0.0.1:{args.port}/v1"
+
+    if args.revert:
+        if not bak.exists():
+            print("No backup found — nothing to revert.")
+            return 0
+        cfg.write_text(bak.read_text())
+        bak.unlink()
+        print("Reverted Hermes config to its original endpoint. Restart Hermes to apply.")
+        return 0
+
+    text = cfg.read_text()
+    m = re.search(r"base_url:\s*(\S+)", text)
+    if not m:
+        raise SystemExit("Could not find a model base_url in the Hermes config.")
+    current = m.group(1)
+    if f":{args.port}/" in current:
+        print(f"Hermes already points at the proxy ({current}). Nothing to do.")
+        return 0
+    if not bak.exists():
+        bak.write_text(text)  # preserve the true original
+    cfg.write_text(text.replace(current, proxy_url))
+
+    print("Connected Hermes to the Matryoshka dashboard proxy.\n")
+    print(f"  Hermes base_url:  {current}  ->  {proxy_url}")
+    print(f"  Backup saved to:  {bak}\n")
+    print("Next:")
+    print(f"  1. Start the proxy in front of your existing endpoint:")
+    print(f"       sclab serve --backend proxy --upstream {current} --port {args.port} --open")
+    print(f"  2. Fully quit and reopen Hermes so it reloads the config.")
+    print(f"  3. Chat as usual — the dashboard lights up on every turn.\n")
+    print(f"  Dashboard:  http://127.0.0.1:{args.port}/dashboard")
+    print(f"  Disconnect: sclab hermes-connect --revert   (then restart Hermes)")
+    print("\n  Note: keep the proxy running while connected — if it stops, Hermes")
+    print("  cannot reach the endpoint until you revert.")
     return 0
 
 
