@@ -31,9 +31,11 @@ from sclab.runtimes.orthrus_engine import (
 from sclab.runtimes.orthrus_mlx import MODEL_ALIASES, _resolve_repo
 from sclab.telemetry import TelemetryStore
 from sclab.dashboard import DASHBOARD_HTML
+from sclab import proxy as _proxy
 
 _STATE: dict[str, Any] = {"model": None, "tokenizer": None, "repo": None, "served_name": None,
-                          "mode": "auto", "block_size": 16, "backoff": 96, "lock": None}
+                          "mode": "auto", "block_size": 16, "backoff": 96,
+                          "backend": "orthrus", "upstream": None, "api_key": "", "lock": None}
 _TELEMETRY = TelemetryStore()
 
 
@@ -108,14 +110,74 @@ class _Handler(BaseHTTPRequestHandler):
             self._html(DASHBOARD_HTML)
         elif path in ("/dashboard/stats", "/stats"):
             snap = _TELEMETRY.snapshot()
-            snap["server"] = {"model": _STATE["served_name"] or _STATE["repo"],
-                              "mode": _STATE["mode"], "block_size": _STATE["block_size"]}
+            snap["server"] = {"model": _STATE["served_name"] or _STATE["repo"] or _STATE["model"],
+                              "mode": _STATE["mode"], "backend": _STATE["backend"],
+                              "block_size": _STATE["block_size"], "upstream": _STATE["upstream"]}
             self._json(200, snap)
         elif path in ("", "/health"):
-            self._json(200, {"status": "ok", "model": _STATE["repo"], "mode": _STATE["mode"],
-                             "dashboard": "/dashboard"})
+            self._json(200, {"status": "ok", "backend": _STATE["backend"],
+                             "model": _STATE["served_name"] or _STATE["repo"] or _STATE["model"],
+                             "mode": _STATE["mode"], "dashboard": "/dashboard"})
         else:
             self._json(404, {"error": {"message": f"unknown path {self.path}"}})
+
+    def _sse_open(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _handle_proxy(self, messages, max_tokens, temperature, stream):
+        name = _STATE["served_name"] or _STATE["model"]
+        rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+        user_text = " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+        _TELEMETRY.start(rid, "proxy", user_text)
+        events = _proxy.stream_chat(_STATE["upstream"], _STATE["model"], messages,
+                                    max_tokens, temperature, _STATE["api_key"])
+
+        def chunk(delta, finish=None):
+            payload = {"id": rid, "object": "chat.completion.chunk", "created": created,
+                       "model": name, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+            return f"data: {json.dumps(payload)}\n\n".encode()
+
+        if stream:
+            self._sse_open()
+            try:
+                self.wfile.write(chunk({"role": "assistant", "content": ""}))
+                for kind, data in events:
+                    if kind == "delta":
+                        _TELEMETRY.tick(None)
+                        self.wfile.write(chunk({"content": data})); self.wfile.flush()
+                    elif kind == "error":
+                        self.wfile.write(chunk({"content": f"\n[proxy error: {data}]"})); self.wfile.flush()
+                self.wfile.write(chunk({}, finish="stop"))
+                self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                _TELEMETRY.finish(None, 0)
+            return
+
+        parts, err = [], None
+        for kind, data in events:
+            if kind == "delta":
+                parts.append(data); _TELEMETRY.tick(None)
+            elif kind == "error":
+                err = data
+        _TELEMETRY.finish(None, 0)
+        if err and not parts:
+            self._json(502, {"error": {"message": f"upstream error: {err}"}})
+            return
+        text = "".join(parts)
+        self._json(200, {
+            "id": rid, "object": "chat.completion", "created": created, "model": name,
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": text}}],
+            "usage": {"prompt_tokens": None, "completion_tokens": len(parts), "total_tokens": None},
+            "sclab": {"decode_mode": "proxy", "upstream_model": _STATE["model"]},
+        })
 
     def do_POST(self):
         if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
@@ -128,9 +190,18 @@ class _Handler(BaseHTTPRequestHandler):
             max_tokens = int(req.get("max_tokens") or req.get("max_completion_tokens") or 1024)
             temperature = float(req.get("temperature") or 0.0)
             stream = bool(req.get("stream"))
+        except Exception as exc:  # malformed request must not kill the server
+            self._json(400, {"error": {"message": str(exc)}})
+            return
+
+        if _STATE["backend"] == "proxy":
+            self._handle_proxy(messages, max_tokens, temperature, stream)
+            return
+
+        try:
             prompt_ids, user_text = _messages_to_prompt_ids(messages)
             gen, mode = _make_generator(prompt_ids, user_text, max_tokens, temperature)
-        except Exception as exc:  # malformed request must not kill the server
+        except Exception as exc:
             self._json(400, {"error": {"message": str(exc)}})
             return
 
@@ -201,16 +272,46 @@ class _Handler(BaseHTTPRequestHandler):
             _TELEMETRY.finish(telemetry, len(prompt_ids))
 
 
+def _open_browser(url: str) -> None:
+    import threading
+    import webbrowser
+
+    def _go():
+        import time as _t
+        _t.sleep(0.8)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+    threading.Thread(target=_go, daemon=True).start()
+
+
 def serve(model: str, host: str = "127.0.0.1", port: int = 8977,
           mode: str = "auto", block_size: int = 16, backoff: int = 96,
-          served_name: Optional[str] = None) -> None:
-    repo = _resolve_repo(model)
-    print(f"Loading {repo} ...")
-    _load(repo)
-    _STATE.update(mode=mode, block_size=block_size, backoff=backoff,
-                  served_name=served_name or model)
-    known = ", ".join(MODEL_ALIASES)
-    print(f"Serving {_STATE['served_name']} on http://{host}:{port}/v1  "
-          f"(mode={mode}, block={block_size}, backoff={backoff})")
-    print(f"Known model aliases: {known}")
+          served_name: Optional[str] = None, backend: str = "auto",
+          upstream: Optional[str] = None, api_key: str = "",
+          open_dashboard: bool = False) -> None:
+    # Resolve backend: explicit upstream (or non-orthrus model) => proxy.
+    if backend == "auto":
+        backend = "proxy" if upstream else "orthrus"
+
+    if backend == "proxy":
+        if not upstream:
+            raise SystemExit("proxy backend requires --upstream (e.g. http://localhost:11434/v1)")
+        _STATE.update(backend="proxy", upstream=upstream, api_key=api_key,
+                      model=model, served_name=served_name or model, mode="proxy")
+        print(f"Proxying '{model}' via {upstream}")
+    else:
+        repo = _resolve_repo(model)
+        print(f"Loading {repo} ...")
+        _load(repo)
+        _STATE.update(backend="orthrus", mode=mode, block_size=block_size, backoff=backoff,
+                      served_name=served_name or model)
+
+    dash = f"http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}/dashboard"
+    print(f"Serving {_STATE['served_name']} ({backend}) on http://{host}:{port}/v1")
+    print(f"Dashboard:  {dash}")
+    print(f"Hermes base URL:  http://{host}:{port}/v1   (API key: any)")
+    if open_dashboard:
+        _open_browser(dash)
     ThreadingHTTPServer((host, port), _Handler).serve_forever()

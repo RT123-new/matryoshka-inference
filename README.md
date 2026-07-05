@@ -60,22 +60,51 @@ pytest -q                           # 30 tests
 Orthrus checkpoints download automatically from Hugging Face on first use
 (`chiennv/Orthrus-Qwen3-1.7B` / `-4B` / `-8B`; ~4/8/16 GB).
 
-## Quickstart
-
-### 1. Accelerated OpenAI-compatible server + live dashboard (MLX, Apple Silicon)
+## One command
 
 ```bash
-sclab serve --model orthrus-qwen3-4b --port 8977
+./quickstart.sh
+```
+
+Creates a venv, installs the package, starts the server, and opens the live
+dashboard in your browser. With no arguments it **auto-detects**: if Ollama is
+running it proxies your first Ollama model (model-agnostic mode); otherwise it
+loads the accelerated Orthrus-Qwen3-4B. Already installed? Just run `sclab up`.
+
+## Quickstart
+
+### Model-agnostic: works with ANY model (Ollama, LM Studio, llama.cpp, vLLM)
+
+Put the dashboard in front of whatever you already run. It measures real
+tokens/sec token-by-token, so the dashboard updates correctly regardless of the
+model:
+
+```bash
+# proxy a running Ollama model — the dashboard now tracks it live
+sclab serve --backend proxy --upstream http://localhost:11434/v1 --model gemma4:latest
+# LM Studio:  --upstream http://localhost:1234/v1
+# any OpenAI-compatible API:  --upstream <base-url> --api-key <key>
+```
+
+Point your client (or Hermes) at `http://127.0.0.1:8977/v1` and open
+`http://127.0.0.1:8977/dashboard`. In proxy mode the Orthrus-only metrics
+(accepted/pass, draft acceptance) show `—`; tokens/sec, throughput, token count
+and the request feed are live for the external model.
+
+### Accelerated: Orthrus dual-view diffusion (MLX, Apple Silicon)
+
+```bash
+sclab serve --model orthrus-qwen3-4b --port 8977      # or: sclab up --model orthrus-qwen3-4b
 ```
 
 Open **http://127.0.0.1:8977/dashboard** — a real-time view of the engine
 working: a live pipeline animation (Prompt → Router → Draft/Verify → Stream),
 tokens/sec, accepted-tokens-per-verification-pass, draft acceptance %, live
-speedup vs AR, a throughput chart, a token-source breakdown (diffusion / copy /
-AR), and a request feed. Every request from any client (including Hermes) lights
-it up. It also has a built-in **playground** so you can watch it work without
-any other app. The dashboard is self-contained (no external assets) and safe to
-embed in a desktop webview.
+speedup vs AR, a throughput chart, a token-source breakdown, and a request feed.
+Every request from any client (including Hermes) lights it up. It also has a
+built-in **playground** so you can watch it work without any other app. The
+dashboard is self-contained (no external assets) and safe to embed in a desktop
+webview.
 
 Then from anything that speaks the OpenAI API:
 
@@ -126,13 +155,18 @@ Every run writes raw JSONL + a Markdown report, always against a raw baseline.
 
 ### Hermes Agent (desktop)
 
-Nous Research's Hermes desktop app connects to any OpenAI-compatible endpoint:
+Nous Research's Hermes desktop app connects to any OpenAI-compatible endpoint.
+Run `sclab hermes-config` to print the exact values to paste, then:
 
-1. `sclab serve --model orthrus-qwen3-4b --port 8977`
+1. `sclab up` (or `sclab serve --model orthrus-qwen3-4b --port 8977`)
 2. In Hermes' setup wizard (or Settings → Providers), choose **Custom
    OpenAI-compatible endpoint**.
 3. Base URL: `http://127.0.0.1:8977/v1` · API key: anything (not checked) ·
-   Model: `orthrus-qwen3-4b`.
+   Model: the name you served (`orthrus-qwen3-4b`, `gemma4:latest`, …).
+
+> Note: Hermes has no plugin API to embed a custom panel *inside* its window, so
+> the dashboard runs as its own browser tab. `sclab up` opens it for you; keep it
+> beside Hermes and it updates live as you chat.
 
 Hermes' `/models` probe is supported, so the model appears in its picker.
 Config lands in `~/.hermes/config.yaml` if you prefer editing it directly.

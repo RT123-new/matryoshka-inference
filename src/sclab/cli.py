@@ -90,18 +90,31 @@ def build_parser() -> argparse.ArgumentParser:
     compress.add_argument("--stats", action="store_true", help="Print token stats to stderr")
     compress.set_defaults(func=cmd_compress)
 
-    serve = subparsers.add_parser(
-        "serve", help="OpenAI-compatible server backed by the Orthrus MLX runtime"
-    )
-    serve.add_argument("--model", default="orthrus-qwen3-4b",
-                       help="Alias (orthrus-qwen3-1.7b/4b/8b) or HF repo id")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8977)
-    serve.add_argument("--mode", default="auto", choices=["auto", "diffusion", "ar"])
-    serve.add_argument("--block-size", type=int, default=16)
-    serve.add_argument("--backoff", type=int, default=96)
-    serve.add_argument("--served-name", default=None, help="Model name to report to clients")
-    serve.set_defaults(func=cmd_serve)
+    for verb, helptext in (("serve", "OpenAI-compatible server + live dashboard"),
+                           ("up", "Start the server AND open the dashboard (one command)")):
+        s = subparsers.add_parser(verb, help=helptext)
+        s.add_argument("--model", default=None,
+                       help="Orthrus alias (orthrus-qwen3-1.7b/4b/8b), HF repo id, "
+                            "or an upstream model name when --upstream/--backend proxy is used")
+        s.add_argument("--backend", default="auto", choices=["auto", "orthrus", "proxy"],
+                       help="orthrus = accelerated MLX; proxy = forward to any OpenAI-compatible model")
+        s.add_argument("--upstream", default=None,
+                       help="Upstream base URL for proxy mode, e.g. http://localhost:11434/v1 (Ollama)")
+        s.add_argument("--api-key", default="", help="Bearer token for the upstream (if any)")
+        s.add_argument("--host", default="127.0.0.1")
+        s.add_argument("--port", type=int, default=8977)
+        s.add_argument("--mode", default="auto", choices=["auto", "diffusion", "ar"])
+        s.add_argument("--block-size", type=int, default=16)
+        s.add_argument("--backoff", type=int, default=96)
+        s.add_argument("--served-name", default=None, help="Model name to report to clients")
+        s.add_argument("--open", dest="open_dash", action="store_true", help="Open the dashboard in a browser")
+        s.set_defaults(func=cmd_serve, _is_up=(verb == "up"))
+
+    hcfg = subparsers.add_parser("hermes-config", help="Print the exact Hermes provider settings to paste")
+    hcfg.add_argument("--host", default="127.0.0.1")
+    hcfg.add_argument("--port", type=int, default=8977)
+    hcfg.add_argument("--model", default="orthrus-qwen3-4b")
+    hcfg.set_defaults(func=cmd_hermes_config)
 
     return parser
 
@@ -244,15 +257,46 @@ def cmd_compress(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     from sclab.server import serve as run_server
 
+    backend = args.backend
+    model = args.model
+    upstream = args.upstream
+    # Smart defaults so `sclab up` just works:
+    if backend == "auto" and not upstream and not model:
+        # No model given -> if an Ollama model is running, proxy it; else Orthrus 4B.
+        from sclab.proxy import discover_ollama_model
+
+        found = discover_ollama_model()
+        if found:
+            backend, upstream, model = "proxy", "http://localhost:11434/v1", found
+            print(f"Auto-detected Ollama model '{found}' — proxying it (model-agnostic mode).")
+        else:
+            model = "orthrus-qwen3-4b"
+    elif not model:
+        model = "orthrus-qwen3-4b"
+
     run_server(
-        model=args.model,
-        host=args.host,
-        port=args.port,
-        mode=args.mode,
-        block_size=args.block_size,
-        backoff=args.backoff,
-        served_name=args.served_name,
+        model=model, host=args.host, port=args.port,
+        mode=args.mode, block_size=args.block_size, backoff=args.backoff,
+        served_name=args.served_name, backend=backend, upstream=upstream,
+        api_key=args.api_key, open_dashboard=getattr(args, "open_dash", False) or getattr(args, "_is_up", False),
     )
+    return 0
+
+
+def cmd_hermes_config(args: argparse.Namespace) -> int:
+    base = f"http://{args.host}:{args.port}/v1"
+    print("Add a Custom OpenAI-compatible provider in Hermes desktop with:\n")
+    print(f"  Base URL:  {base}")
+    print(f"  API key:   local            (any value — it is not checked)")
+    print(f"  Model:     {args.model}\n")
+    print("Config file (if you edit it directly): ~/.hermes/config.yaml\n")
+    print("providers:")
+    print("  matryoshka:")
+    print("    type: openai")
+    print(f"    base_url: {base}")
+    print("    api_key: local")
+    print(f"    model: {args.model}")
+    print(f"\nDashboard while you chat:  http://{args.host}:{args.port}/dashboard")
     return 0
 
 

@@ -52,6 +52,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     background:rgba(45,212,191,.07)}
   .node.active.ar{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber),0 0 22px rgba(245,166,35,.25);
     background:rgba(245,166,35,.07)}
+  .node.active.proxy{border-color:#58a6ff;box-shadow:0 0 0 1px #58a6ff,0 0 22px rgba(88,166,255,.28);
+    background:rgba(88,166,255,.08)}
   .arrow{flex:0 0 auto;width:30px;height:2px;background:var(--bd);position:relative}
   .arrow.flow{background:linear-gradient(90deg,var(--teal),transparent);
     animation:flow 1s linear infinite}
@@ -70,6 +72,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   .bar{height:26px;border-radius:6px;overflow:hidden;display:flex;background:var(--panel2);border:1px solid var(--bd)}
   .bar span{display:block;height:100%}
   .seg-diff{background:var(--teal)} .seg-copy{background:var(--violet)} .seg-ar{background:var(--amber)}
+  .seg-model{background:#58a6ff}
+  .chip.proxy{background:rgba(88,166,255,.14);color:#58a6ff}
   .legend{display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--mut);flex-wrap:wrap}
   .sw{width:10px;height:10px;border-radius:3px;display:inline-block;margin-right:6px;vertical-align:middle}
   /* feed */
@@ -130,6 +134,9 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div class="lane" id="lane-ar">
           <div class="node ar" id="n-decode"><div class="t">Decode</div><div class="d">plain AR</div></div>
         </div>
+        <div class="lane" id="lane-proxy">
+          <div class="node proxy" id="n-model"><div class="t">Model</div><div class="d" id="n-model-d">external</div></div>
+        </div>
       </div>
       <div class="arrow" id="a3"></div>
       <div class="node" id="n-stream"><div class="t">Stream</div><div class="d">to client</div></div>
@@ -154,11 +161,13 @@ DASHBOARD_HTML = r"""<!doctype html>
         <span class="seg-diff" id="s-diff" style="width:0"></span>
         <span class="seg-copy" id="s-copy" style="width:0"></span>
         <span class="seg-ar" id="s-ar" style="width:0"></span>
+        <span class="seg-model" id="s-model" style="width:0"></span>
       </div>
       <div class="legend">
         <span><span class="sw seg-diff"></span>diffusion (verified draft) <b id="l-diff" class="mono">0</b></span>
         <span><span class="sw seg-copy"></span>copy (repeat) <b id="l-copy" class="mono">0</b></span>
         <span><span class="sw seg-ar"></span>AR correction <b id="l-ar" class="mono">0</b></span>
+        <span><span class="sw seg-model"></span>external model <b id="l-model" class="mono">0</b></span>
       </div>
     </div>
     <div class="panel">
@@ -166,7 +175,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <table>
         <tr><td>Requests served</td><td class="mono" id="t-req" style="text-align:right">0</td></tr>
         <tr><td>Tokens generated</td><td class="mono" id="t-tok" style="text-align:right">0</td></tr>
-        <tr><td>Routed to diffusion / AR</td><td class="mono" id="t-mode" style="text-align:right">0 / 0</td></tr>
+        <tr><td>Diffusion / AR / proxy</td><td class="mono" id="t-mode" style="text-align:right">0 / 0 / 0</td></tr>
         <tr><td>Draft positions pruned</td><td class="mono" id="t-prune" style="text-align:right">0</td></tr>
       </table>
     </div>
@@ -200,28 +209,40 @@ DASHBOARD_HTML = r"""<!doctype html>
 const $=id=>document.getElementById(id);
 const fmt=n=>Number(n).toLocaleString();
 
-function setPipe(live){
-  const active=live.active, mode=live.mode, ph=live.phase;
-  const diffOn = active && mode==='diffusion';
-  const arOn = active && mode==='ar';
-  $('lane-diff').classList.toggle('on', diffOn || !active);
-  $('lane-ar').classList.toggle('on', arOn || !active);
-  // node states
+function setPipe(live, server){
+  const proxy = (server?.backend==='proxy');
+  const active=live.active;
+  const diffOn = active && live.mode==='diffusion';
+  const arOn = active && live.mode==='ar';
+  const pxOn = active && (live.mode==='proxy' || proxy);
+  $('lane-diff').classList.toggle('on', proxy ? false : (diffOn || !active));
+  $('lane-ar').classList.toggle('on', proxy ? false : (arOn || !active));
+  $('lane-proxy').style.display = proxy ? 'flex' : 'none';
+  $('lane-proxy').classList.toggle('on', proxy);
   $('n-prompt').classList.toggle('active', active);
   $('n-route').classList.toggle('active', active);
   $('n-stream').classList.toggle('active', active);
   $('n-draft').classList.toggle('active', diffOn);
   $('n-verify').classList.toggle('active', diffOn);
-  $('n-decode').classList.toggle('active', arOn);
-  $('n-decode').classList.toggle('ar', true);
-  // arrows
-  ['a1','a2','a3'].forEach(a=>{const e=$(a);e.classList.toggle('flow',active);e.classList.toggle('ar',arOn)});
+  $('n-decode').classList.toggle('active', arOn); $('n-decode').classList.add('ar');
+  $('n-model').classList.toggle('active', pxOn); $('n-model').classList.add('proxy');
+  $('n-model-d').textContent = server?.model || 'external';
+  ['a1','a2','a3'].forEach(a=>{const e=$(a);e.classList.toggle('flow',active);
+    e.classList.toggle('ar',arOn); });
   $('n-prompt-d').textContent = active ? (live.tokens+' tok') : 'idle';
-  $('n-route-d').textContent = active ? mode.toUpperCase() : 'auto';
+  $('n-route-d').textContent = proxy ? 'proxy' : (active ? live.mode.toUpperCase() : 'auto');
   $('cyc').style.display = diffOn ? 'inline-block':'none';
+  if(proxy){
+    $('cap').innerHTML = active
+      ? `Proxying <b style="color:#58a6ff">${server.model}</b> — measuring real throughput token-by-token. `
+        + `Any OpenAI-compatible model works; acceleration metrics apply only to Orthrus MLX models.`
+      : `Proxy mode: forwarding to <b style="color:#58a6ff">${server?.model||'an external model'}</b>. `
+        + `The dashboard reports live tokens/sec for whatever model is running.`;
+    return;
+  }
   if(active){
     const src = diffOn ? 'var(--teal)' : 'var(--amber)';
-    $('cap').innerHTML = `Generating in <b style="color:${src}">${mode.toUpperCase()}</b> — `
+    $('cap').innerHTML = `Generating in <b style="color:${src}">${live.mode.toUpperCase()}</b> — `
       + (diffOn
          ? `drafting a block and verifying it with the exact model: <b>${live.accepted_per_pass}</b> accepted tokens per pass, <b>${Math.round(live.acceptance_rate*100)}%</b> draft acceptance.`
          : `one verified token per pass (prose drafts poorly, so the router picked plain AR).`);
@@ -247,23 +268,27 @@ function render(s){
   $('dot').classList.add('on');
   $('b-model').textContent = 'model · '+(s.server?.model||'—');
   $('b-mode').textContent = 'mode · '+(s.server?.mode||'—');
-  const lv=s.live, r=s.rates;
-  $('m-tps').textContent = lv.active ? lv.tok_s : (r.diffusion_tok_s||0);
-  $('m-app').textContent = (lv.active?lv.accepted_per_pass:(s.history[0]?.accepted_per_pass))||'1.0';
-  $('m-acc').textContent = Math.round(((lv.active?lv.acceptance_rate:(s.history[0]?.acceptance_rate))||0)*100);
-  $('m-spd').textContent = r.speedup_vs_ar ? r.speedup_vs_ar : '—';
-  setPipe(lv);
+  const lv=s.live, r=s.rates, proxy=(s.server?.backend==='proxy');
+  $('m-tps').textContent = lv.active ? lv.tok_s : (proxy ? (s.history[0]?.tok_s||0) : (r.diffusion_tok_s||0));
+  // Orthrus-only metrics are N/A when proxying an external model.
+  $('m-app').textContent = proxy ? '—' : ((lv.active?lv.accepted_per_pass:(s.history[0]?.accepted_per_pass))||'1.0');
+  $('m-acc').textContent = proxy ? '—' : Math.round(((lv.active?lv.acceptance_rate:(s.history[0]?.acceptance_rate))||0)*100);
+  $('m-spd').textContent = proxy ? '—' : (r.speedup_vs_ar ? r.speedup_vs_ar : '—');
+  setPipe(lv, s.server);
   drawChart(s.spark);
-  // sources
-  const src=s.totals.tokens_by_source, tot=(src.diffusion+src.copy+src.ar)||1;
+  // sources (4-way)
+  const src=s.totals.tokens_by_source, tot=(src.diffusion+src.copy+src.ar+(src.model||0))||1;
   $('s-diff').style.width=(100*src.diffusion/tot)+'%';
   $('s-copy').style.width=(100*src.copy/tot)+'%';
   $('s-ar').style.width=(100*src.ar/tot)+'%';
-  $('l-diff').textContent=fmt(src.diffusion);$('l-copy').textContent=fmt(src.copy);$('l-ar').textContent=fmt(src.ar);
+  $('s-model').style.width=(100*(src.model||0)/tot)+'%';
+  $('l-diff').textContent=fmt(src.diffusion);$('l-copy').textContent=fmt(src.copy);
+  $('l-ar').textContent=fmt(src.ar);$('l-model').textContent=fmt(src.model||0);
   // totals
   $('t-req').textContent=fmt(s.totals.requests);
   $('t-tok').textContent=fmt(s.totals.tokens);
-  $('t-mode').textContent=s.totals.by_mode.diffusion+' / '+s.totals.by_mode.ar;
+  const bm=s.totals.by_mode;
+  $('t-mode').textContent=(bm.diffusion||0)+' / '+(bm.ar||0)+' / '+(bm.proxy||0);
   $('t-prune').textContent=fmt(s.totals.pruned_positions);
   // feed
   const fb=$('feed');

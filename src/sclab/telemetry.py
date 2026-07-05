@@ -42,8 +42,8 @@ class TelemetryStore:
         # aggregate totals
         self.requests = 0
         self.tokens_total = 0
-        self.by_mode = {"diffusion": 0, "ar": 0}          # requests per mode
-        self.tokens_by_source = {"diffusion": 0, "copy": 0, "ar": 0}
+        self.by_mode = {"diffusion": 0, "ar": 0, "proxy": 0}   # requests per mode
+        self.tokens_by_source = {"diffusion": 0, "copy": 0, "ar": 0, "model": 0}
         self.verification_passes = 0
         self.accepted_from_draft = 0
         self.pruned_positions = 0
@@ -85,6 +85,9 @@ class TelemetryStore:
             self.requests += 1
             self.tokens_total += lv.tokens
             self.by_mode[lv.mode] = self.by_mode.get(lv.mode, 0) + 1
+            if lv.mode == "proxy":
+                # External model: no draft/verify — every token is autoregressive.
+                self.tokens_by_source["model"] += lv.tokens
             for src, n in (summary.get("source_mix") or {}).items():
                 self.tokens_by_source[src] = self.tokens_by_source.get(src, 0) + n
             self.verification_passes += summary.get("verification_passes", lv.tokens)
@@ -93,7 +96,11 @@ class TelemetryStore:
                 * max(0, summary.get("verification_passes", 0))
             )
             self.pruned_positions += summary.get("pruned_draft_positions", 0)
-            (self._diff_tps if lv.mode == "diffusion" else self._ar_tps).append(tok_s)
+            # Only Orthrus modes feed the AR-vs-diffusion speedup estimate.
+            if lv.mode == "diffusion":
+                self._diff_tps.append(tok_s)
+            elif lv.mode == "ar":
+                self._ar_tps.append(tok_s)
             self._history.appendleft({
                 "request_id": lv.request_id,
                 "mode": lv.mode,
