@@ -48,7 +48,8 @@ def build_markdown_report(results: list[dict[str, Any]], run_dir: Path) -> str:
         "| compressor | tasks | avg quality | avg prompt ratio | avg latency factor | pass rate |",
         "|---|---:|---:|---:|---:|---:|",
     ]
-    for compressor, rows in sorted(by_compressor.items(), key=lambda item: _avg(item[1], "quality_score"), reverse=True):
+    ranked = sorted(by_compressor.items(), key=lambda item: _avg(item[1], "quality_score"), reverse=True)
+    for compressor, rows in ranked:
         lines.append(
             f"| {compressor} | {len(rows)} | {_avg(rows, 'quality_score'):.3f} | "
             f"{_avg(rows, 'compression_ratio'):.3f} | {_avg(rows, 'latency_improvement_factor'):.3f} | "

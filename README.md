@@ -54,7 +54,7 @@ cd matryoshka-inference
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[orthrus,dev]"     # [orthrus] = MLX decode path (Apple Silicon)
 pip install -e .                    # compression-only (any platform / runtime)
-pytest -q                           # 30 tests
+pytest -q                           # full test suite, no GPU required
 ```
 
 Orthrus checkpoints download automatically from Hugging Face on first use
@@ -82,6 +82,8 @@ model:
 ```bash
 # proxy a running Ollama model — the dashboard now tracks it live
 sclab serve --backend proxy --upstream http://localhost:11434/v1 --model gemma4:latest
+# zero-flag version: defaults the upstream to Ollama and auto-picks its first model
+sclab serve --backend proxy
 # LM Studio:  --upstream http://localhost:1234/v1
 # any OpenAI-compatible API:  --upstream <base-url> --api-key <key>
 ```
@@ -89,7 +91,9 @@ sclab serve --backend proxy --upstream http://localhost:11434/v1 --model gemma4:
 Point your client (or Hermes) at `http://127.0.0.1:8977/v1` and open
 `http://127.0.0.1:8977/dashboard`. In proxy mode the Orthrus-only metrics
 (accepted/pass, draft acceptance) show `—`; tokens/sec, throughput, token count
-and the request feed are live for the external model.
+and the request feed are live for the external model. Chat completions are
+observed for telemetry; every other `/v1` endpoint the upstream serves
+(embeddings, legacy completions, ...) passes through untouched.
 
 ### Accelerated: Orthrus dual-view diffusion (MLX, Apple Silicon)
 
@@ -120,7 +124,7 @@ The response's `sclab` field reports decode mode, accepted-tokens-per-pass and
 source mix, so you can see the acceleration working. `--mode auto` (default)
 routes each request; force `--mode diffusion` or `--mode ar` to pin it.
 
-### 2. Compression with Ollama (any model, today)
+### Compression with Ollama (any model, today)
 
 Compress a long document before sending it — measured 1.36× faster at equal
 quality on a 35B MoE, and up to 1.9× on long contexts:
@@ -288,7 +292,7 @@ src/sclab/vendor/orthrus/  Orthrus MLX architecture (MIT, Chien Nguyen)
 docs/                      all findings write-ups (positive AND negative)
 results/                   raw JSONL from every headline benchmark
 data/tasks/                benchmark datasets (short + long-context)
-tests/                     30 tests, no GPU required
+tests/                     test suite (incl. live HTTP proxy tests), no GPU required
 ```
 
 ## Credits

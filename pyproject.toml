@@ -4,17 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "matryoshka-inference"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lossless local LLM acceleration on Apple Silicon: semantic prompt compression + verified speculative (dual-view diffusion) decoding, with honest benchmarks."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
-  "pydantic>=2.0",
-  "rich>=13.0",
   "requests>=2.31",
   "psutil>=5.9",
-  "numpy>=1.24",
   "scikit-learn>=1.3",
 ]
 
@@ -28,13 +34,15 @@ orthrus = [
   "safetensors",
   "sentencepiece",
 ]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
 sclab = "sclab.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/RT123-new/matryoshka-inference"
+Repository = "https://github.com/RT123-new/matryoshka-inference"
+Issues = "https://github.com/RT123-new/matryoshka-inference/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -45,3 +53,22 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["src/sclab/vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+  "E731",  # lambda assignments are used deliberately for tiny detokenize hooks
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Inline HTML/JS templates and long fixture strings read better unwrapped.
+"src/sclab/dashboard.py" = ["E501"]
+"src/sclab/ab.py" = ["E501"]
+"scripts/*" = ["E501"]
+"tests/*" = ["E501"]

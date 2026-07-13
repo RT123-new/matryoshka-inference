@@ -20,7 +20,7 @@ import html
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from sclab.benchmarks.datasets import load_tasks
 from sclab.benchmarks.runner import render_prompt
@@ -30,7 +30,7 @@ from sclab.runtimes.base import GenerationRequest
 from sclab.runtimes.ollama import OllamaRuntime
 
 
-def read_hermes_model(config_path: str = "~/.hermes/config.yaml") -> tuple[Optional[str], Optional[str], Optional[int]]:
+def read_hermes_model(config_path: str = "~/.hermes/config.yaml") -> tuple[str | None, str | None, int | None]:
     """Return (model, ollama_base_url, num_ctx) from Hermes' config, if present."""
     p = Path(config_path).expanduser()
     if not p.exists():
@@ -48,7 +48,7 @@ def read_hermes_model(config_path: str = "~/.hermes/config.yaml") -> tuple[Optio
     return model, base, num_ctx
 
 
-def _eff_tps(completion: Optional[int], total_s: Optional[float]) -> Optional[float]:
+def _eff_tps(completion: int | None, total_s: float | None) -> float | None:
     if completion and total_s and total_s > 0:
         return completion / total_s
     return None
@@ -61,8 +61,8 @@ def run_ab(
     base_url: str = "http://127.0.0.1:11434",
     compressor_name: str = "extractive_relevance",
     max_tokens: int = 220,
-    max_tasks: Optional[int] = None,
-    num_ctx: Optional[int] = None,
+    max_tasks: int | None = None,
+    num_ctx: int | None = None,
     progress=lambda s: None,
 ) -> dict[str, Any]:
     rt = OllamaRuntime(base_url)
@@ -132,7 +132,7 @@ def run_ab_orthrus(
     out_dir: str,
     block_size: int = 16,
     max_tokens: int = 200,
-    max_tasks: Optional[int] = None,
+    max_tasks: int | None = None,
     progress=lambda s: None,
 ) -> dict[str, Any]:
     """Acceleration A/B on an Orthrus MLX model: plain AR decode (baseline) vs
@@ -198,7 +198,7 @@ def _write_report(out_dir: str, meta: dict, rows: list[dict]) -> None:
     (out / "report.md").write_text(build_md(meta, rows), encoding="utf-8")
 
 
-def _avg(vals: list[Optional[float]]) -> Optional[float]:
+def _avg(vals: list[float | None]) -> float | None:
     vals = [v for v in vals if v is not None]
     return (sum(vals) / len(vals)) if vals else None
 
@@ -231,7 +231,7 @@ def build_md(meta: dict, rows: list[dict]) -> str:
             f"| {r['area']} | {bm}→{mm} | {_fmt(b['total_s'])}→{_fmt(m['total_s'])} | "
             f"{sval or '—'}x | {b['quality']}→{m['quality']} |"
         )
-    return "\n".join(l for l in lines if l is not None)
+    return "\n".join(line for line in lines if line is not None)
 
 
 def _fmt(v) -> str:
@@ -289,7 +289,7 @@ def build_html(meta: dict, rows: list[dict]) -> str:
         </div>""")
 
     if accel:
-        kpi2 = f"<div class='kpi'><div class='l'>Avg accepted / pass</div><div class='v'>{acc:.1f}</div></div>" if acc else "<div class='kpi'><div class='l'>Decode speedup</div><div class='v'>{:.2f}×</div></div>".format(sp)
+        kpi2 = f"<div class='kpi'><div class='l'>Avg accepted / pass</div><div class='v'>{acc:.1f}</div></div>" if acc else f"<div class='kpi'><div class='l'>Decode speedup</div><div class='v'>{sp:.2f}×</div></div>"
         speed_label = "Avg speedup (decode)"
         note = ("\"Matryoshka on\" here = dual-view diffusion decoding on the same Orthrus MLX "
                 "model. Every drafted block is verified by the exact autoregressive pass, so the "

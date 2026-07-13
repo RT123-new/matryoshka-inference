@@ -23,7 +23,7 @@ class BenchmarkTask:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_record(cls, record: dict[str, Any]) -> "BenchmarkTask":
+    def from_record(cls, record: dict[str, Any]) -> BenchmarkTask:
         required = ["id", "type", "document", "question", "gold_answer"]
         missing = [key for key in required if key not in record]
         if missing:
@@ -83,7 +83,8 @@ def ingest_documents(input_path: str | Path, out_path: str | Path) -> list[Bench
                 metadata={
                     "source_path": str(path),
                     "manual_review_required": True,
-                    "note": "No local model-generated task was created; benchmark compression ratios or use sclab single.",
+                    "note": ("No local model-generated task was created; "
+                             "benchmark compression ratios or use sclab single."),
                 },
             )
         )

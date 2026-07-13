@@ -35,7 +35,9 @@ class FakeRuntime(ApproxTokenCounterMixin):
             if task.get("type") in {"number_date", "single_fact"} and (numbers or dates):
                 text = " ".join((dates + numbers)[:3])
             else:
-                text = "Not found in compressed source." if "compressed" in request.prompt[:500].lower() else "Not found in source."
+                text = ("Not found in compressed source."
+                        if "compressed" in request.prompt[:500].lower()
+                        else "Not found in source.")
 
         # Simulate prompt processing cost so compression can show directionally meaningful timings in CI.
         prompt_tokens = count_tokens(request.prompt, model=request.model).value

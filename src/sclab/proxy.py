@@ -14,12 +14,13 @@ only observes the stream for telemetry; it never rewrites it.
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator, Optional
+from collections.abc import Iterator
+from typing import Any
 
 import requests
 
 
-def discover_ollama_model(base_url: str = "http://localhost:11434") -> Optional[str]:
+def discover_ollama_model(base_url: str = "http://localhost:11434") -> str | None:
     """Return the first available Ollama model, or None."""
     try:
         r = requests.get(f"{base_url.rstrip('/')}/api/tags", timeout=2)
@@ -32,7 +33,7 @@ def discover_ollama_model(base_url: str = "http://localhost:11434") -> Optional[
     return None
 
 
-def list_models(upstream: str, api_key: str, timeout: int = 5) -> Optional[dict]:
+def list_models(upstream: str, api_key: str, timeout: int = 5) -> dict | None:
     """Return the upstream's /v1/models response verbatim, or None on failure."""
     try:
         r = requests.get(upstream.rstrip("/") + "/models", headers=_headers(api_key), timeout=timeout)
@@ -70,6 +71,7 @@ def forward_stream(upstream: str, api_key: str, body: dict, timeout: int = 600
     Yields:
       ("raw", line)   - a verbatim SSE data line to write straight to the client
       ("tokens", n)   - token count parsed from that line (for telemetry)
+      ("usage", n)    - exact completion_tokens from the upstream's usage chunk
       ("error", msg)  - upstream failure
     The full client body is forwarded; only stream flags are forced on.
     """
@@ -91,9 +93,13 @@ def forward_stream(upstream: str, api_key: str, body: dict, timeout: int = 600
                     data = raw[5:].strip()
                     if data and data != "[DONE]":
                         try:
-                            yield "tokens", count_delta_tokens(json.loads(data))
+                            obj = json.loads(data)
                         except json.JSONDecodeError:
-                            pass
+                            continue
+                        yield "tokens", count_delta_tokens(obj)
+                        usage = obj.get("usage") or {}
+                        if usage.get("completion_tokens"):
+                            yield "usage", int(usage["completion_tokens"])
     except requests.RequestException as exc:
         yield "error", str(exc)
 
@@ -112,3 +118,33 @@ def forward_once(upstream: str, api_key: str, body: dict, timeout: int = 600
             return resp.status_code, {"error": {"message": resp.text[:300]}}
     except requests.RequestException as exc:
         return 502, {"error": {"message": str(exc)}}
+
+
+def forward_raw(upstream: str, api_key: str, method: str, path: str,
+                body: bytes | None = None, content_type: str = "application/json",
+                timeout: int = 600) -> tuple[int, str, Iterator[bytes]]:
+    """Byte-for-byte passthrough for any other endpoint the upstream serves
+    (embeddings, legacy completions, ...), so a client pointed at the proxy
+    never hits a 404 the real endpoint would have answered.
+
+    ``path`` is relative to the upstream base (e.g. "/embeddings"). Returns
+    ``(status, content_type, chunk_iterator)``; the iterator keeps the upstream
+    connection open until drained, and streams SSE bodies chunk-by-chunk.
+    """
+    url = upstream.rstrip("/") + path
+    headers = _headers(api_key)
+    headers["Content-Type"] = content_type
+    try:
+        resp = requests.request(method, url, data=body, headers=headers,
+                                stream=True, timeout=timeout)
+    except requests.RequestException as exc:
+        payload = json.dumps({"error": {"message": str(exc)}}).encode()
+        return 502, "application/json", iter([payload])
+
+    def _chunks() -> Iterator[bytes]:
+        try:
+            yield from resp.iter_content(chunk_size=8192)
+        finally:
+            resp.close()
+
+    return resp.status_code, resp.headers.get("Content-Type", "application/json"), _chunks()

@@ -20,7 +20,7 @@ request.model is a short alias resolved to an HF repo id, or a repo id itself.
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from typing import Any
 
 from sclab.runtimes.base import ApproxTokenCounterMixin, GenerationRequest, GenerationResult
 from sclab.runtimes.orthrus_engine import (
@@ -43,7 +43,7 @@ def _resolve_repo(model: str) -> str:
     return MODEL_ALIASES.get(model.lower(), model)
 
 
-def _peak_memory_bytes() -> Optional[int]:
+def _peak_memory_bytes() -> int | None:
     try:
         import mlx.core as mx
         for getter in ("get_peak_memory",):
@@ -142,7 +142,7 @@ class OrthrusMLXRuntime(ApproxTokenCounterMixin):
 
         _reset_peak_memory()
         start = time.perf_counter()
-        first_token_s: Optional[float] = None
+        first_token_s: float | None = None
         out_tokens: list[int] = []
         telemetry = None
 
@@ -155,8 +155,8 @@ class OrthrusMLXRuntime(ApproxTokenCounterMixin):
                 prune_tau=prune_tau,
             )
 
-        prefill_done_s: Optional[float] = None
-        for tok, telemetry in gen:
+        prefill_done_s: float | None = None
+        for tok, telemetry in gen:  # noqa: B007 - telemetry is read after the loop
             if first_token_s is None:
                 first_token_s = time.perf_counter() - start
                 prefill_done_s = first_token_s

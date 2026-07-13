@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sclab.compressors.base import Compressor, CompressionResult, Document
+from sclab.compressors.base import CompressionResult, Compressor, Document
 from sclab.compressors.extractive import ExtractiveRelevanceCompressor
 from sclab.compressors.fact_table import FactTableCompressor
 from sclab.compressors.gzip_control import GzipB64ControlCompressor

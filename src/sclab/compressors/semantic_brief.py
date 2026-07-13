@@ -112,7 +112,8 @@ class SemanticBriefCompressor:
                 score += 1
             if score == 0 and lowered.startswith("distractor "):
                 continue
-            if ":" in stripped or re.match(r"^[-*]\s+", line.strip()) or extract_numbers(stripped) or extract_dates(stripped):
+            if (":" in stripped or re.match(r"^[-*]\s+", line.strip())
+                    or extract_numbers(stripped) or extract_dates(stripped)):
                 scored.append((score, truncate_words(stripped, 40)))
         if any(score > 0 for score, _ in scored):
             scored = [item for item in scored if item[0] > 0]
