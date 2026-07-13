@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 
-
 DISTRACTORS = [
     "Facilities note: the lobby plants were watered, visitor badges were reordered, and the third-floor whiteboard markers were replaced.",
     "Operations note: weekly lunch moved to noon, the office map was refreshed, and the old printer queue was renamed.",

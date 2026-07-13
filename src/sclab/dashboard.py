@@ -208,6 +208,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 <script>
 const $=id=>document.getElementById(id);
 const fmt=n=>Number(n).toLocaleString();
+const esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+let servedModel='';
 
 function setPipe(live, server){
   const proxy = (server?.backend==='proxy');
@@ -234,9 +236,9 @@ function setPipe(live, server){
   $('cyc').style.display = diffOn ? 'inline-block':'none';
   if(proxy){
     $('cap').innerHTML = active
-      ? `Proxying <b style="color:#58a6ff">${server.model}</b> — measuring real throughput token-by-token. `
+      ? `Proxying <b style="color:#58a6ff">${esc(server.model)}</b> — measuring real throughput token-by-token. `
         + `Any OpenAI-compatible model works; acceleration metrics apply only to Orthrus MLX models.`
-      : `Proxy mode: forwarding to <b style="color:#58a6ff">${server?.model||'an external model'}</b>. `
+      : `Proxy mode: forwarding to <b style="color:#58a6ff">${esc(server?.model)||'an external model'}</b>. `
         + `The dashboard reports live tokens/sec for whatever model is running.`;
     return;
   }
@@ -266,8 +268,10 @@ function drawChart(spark){
 
 function render(s){
   $('dot').classList.add('on');
+  servedModel = s.server?.model || '';
   $('b-model').textContent = 'model · '+(s.server?.model||'—');
-  $('b-mode').textContent = 'mode · '+(s.server?.mode||'—');
+  $('b-mode').textContent = 'mode · '+(s.server?.mode||'—')
+    +((s.live?.concurrent||0)>1 ? ' · '+s.live.concurrent+' in flight' : '');
   const lv=s.live, r=s.rates, proxy=(s.server?.backend==='proxy');
   $('m-tps').textContent = lv.active ? lv.tok_s : (proxy ? (s.history[0]?.tok_s||0) : (r.diffusion_tok_s||0));
   // Orthrus-only metrics are N/A when proxying an external model.
@@ -294,10 +298,11 @@ function render(s){
   const fb=$('feed');
   if(s.history.length){
     fb.innerHTML=s.history.map(h=>`<tr>
-      <td><span class="chip ${h.mode}">${h.mode}</span></td>
+      <td><span class="chip ${esc(h.mode)}">${esc(h.mode)}</span></td>
       <td class="mono">${h.tokens}</td><td class="mono">${h.tok_s}</td>
-      <td class="mono">${h.accepted_per_pass}</td><td class="mono">${Math.round(h.acceptance_rate*100)}%</td>
-      <td class="mono">${h.ms}</td><td class="prev">${(h.prompt_preview||'').replace(/</g,'&lt;')}</td></tr>`).join('');
+      <td class="mono">${h.accepted_per_pass ?? '—'}</td>
+      <td class="mono">${h.mode==='proxy' ? '—' : Math.round(h.acceptance_rate*100)+'%'}</td>
+      <td class="mono">${h.ms}</td><td class="prev">${esc(h.prompt_preview)}</td></tr>`).join('');
   }
 }
 
@@ -314,14 +319,15 @@ $('pg-send').onclick=async()=>{
   $('pg-note').textContent='streaming…';
   try{
     const res=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'local',stream:true,max_tokens:400,
+      body:JSON.stringify({model:servedModel||'local',stream:true,max_tokens:400,
         messages:[{role:'user',content:$('pg-in').value}]})});
     const rd=res.body.getReader(), dec=new TextDecoder(); let buf='';
     while(true){const {done,value}=await rd.read(); if(done)break;
       buf+=dec.decode(value,{stream:true}); let i;
       while((i=buf.indexOf('\n\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+2);
         if(line.startsWith('data: ')){const d=line.slice(6); if(d==='[DONE]')continue;
-          try{const j=JSON.parse(d);const c=j.choices?.[0]?.delta?.content;if(c)out.textContent+=c;}catch(e){}}}}
+          try{const j=JSON.parse(d);const c=j.choices?.[0]?.delta?.content;if(c)out.textContent+=c;
+            if(j.error)out.textContent+='\n[error] '+(j.error.message||JSON.stringify(j.error));}catch(e){}}}}
     $('pg-note').textContent='done';
   }catch(e){$('pg-note').textContent='error: '+e.message;}
   finally{btn.disabled=false;}

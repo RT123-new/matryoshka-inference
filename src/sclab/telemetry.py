@@ -3,40 +3,46 @@
 The OpenAI-compatible server updates this as tokens are generated; the dashboard
 polls :meth:`TelemetryStore.snapshot` a few times a second. Everything is plain
 data so the snapshot serialises straight to JSON.
+
+Sessions are keyed by request id, so overlapping requests (the proxy backend
+serves them concurrently) each keep their own token counts and timings instead
+of trampling a single shared slot. The dashboard's "live" view follows the most
+recently started request that is still running.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from collections import OrderedDict, deque
+from typing import Any
 
 
-@dataclass
 class _Live:
-    active: bool = False
-    request_id: str = ""
-    mode: str = ""              # "diffusion" | "ar"
-    phase: str = "idle"         # "route" | "draft" | "verify" | "decode" | "stream" | "done"
-    prompt_preview: str = ""
-    tokens: int = 0
-    started: float = 0.0
-    accepted_per_pass: float = 1.0
-    acceptance_rate: float = 0.0
+    __slots__ = ("request_id", "mode", "phase", "prompt_preview", "tokens", "started")
+
+    def __init__(self, request_id: str = "", mode: str = "", prompt_preview: str = "") -> None:
+        self.request_id = request_id
+        self.mode = mode                    # "diffusion" | "ar" | "proxy"
+        self.phase = "route"                # "route" | "draft" | "verify" | "decode" | "stream"
+        self.prompt_preview = prompt_preview[:160]
+        self.tokens = 0
+        self.started = time.perf_counter()
 
     def elapsed(self) -> float:
-        return max(1e-6, time.perf_counter() - self.started) if self.active else 0.0
+        return max(1e-6, time.perf_counter() - self.started)
 
     def tok_s(self) -> float:
-        return (self.tokens / self.elapsed()) if self.active and self.tokens else 0.0
+        return (self.tokens / self.elapsed()) if self.tokens else 0.0
 
 
 class TelemetryStore:
     def __init__(self, baseline_tok_s: float = 0.0) -> None:
         self._lock = threading.Lock()
-        self._live = _Live()
+        # request_id -> live session, in start order (last = most recent).
+        self._sessions: OrderedDict[str, _Live] = OrderedDict()
+        # request_id -> latest DecodeTelemetry seen for that session.
+        self._session_tel: dict[str, Any] = {}
         self._history: deque[dict[str, Any]] = deque(maxlen=40)
         self._spark: deque[float] = deque(maxlen=160)  # rolling tok/s samples
         # aggregate totals
@@ -55,36 +61,45 @@ class TelemetryStore:
     # -- generation hooks ------------------------------------------------- #
     def start(self, request_id: str, mode: str, prompt_preview: str) -> None:
         with self._lock:
-            self._live = _Live(
-                active=True, request_id=request_id, mode=mode,
-                phase="route", prompt_preview=prompt_preview[:160],
-                started=time.perf_counter(),
-            )
+            self._sessions[request_id] = _Live(request_id, mode, prompt_preview)
 
-    def phase(self, phase: str) -> None:
+    def phase(self, request_id: str, phase: str) -> None:
         with self._lock:
-            self._live.phase = phase
+            lv = self._sessions.get(request_id)
+            if lv is not None:
+                lv.phase = phase
 
-    def tick(self, telemetry: Optional[Any] = None) -> None:
-        """Called once per emitted token."""
+    def tick(self, request_id: str, telemetry: Any | None = None, n: int = 1) -> None:
+        """Called as tokens are emitted (``n`` tokens per call)."""
         with self._lock:
-            lv = self._live
-            lv.tokens += 1
+            lv = self._sessions.get(request_id)
+            if lv is None:
+                return
+            lv.tokens += n
             lv.phase = "verify" if lv.mode == "diffusion" else "decode"
             if telemetry is not None:
-                lv.accepted_per_pass = telemetry.accepted_tokens_per_verification_pass
-                lv.acceptance_rate = telemetry.draft_acceptance_rate
+                self._session_tel[request_id] = telemetry
             self._spark.append(round(lv.tok_s(), 1))
 
-    def set_tokens(self, n: int) -> None:
-        """Record a whole non-streaming response's token count at once."""
+    def set_tokens(self, request_id: str, n: int) -> None:
+        """Record a whole response's token count at once (non-streaming)."""
         with self._lock:
-            self._live.tokens = n
-            self._spark.append(round(self._live.tok_s(), 1))
+            lv = self._sessions.get(request_id)
+            if lv is None:
+                return
+            lv.tokens = n
+            self._spark.append(round(lv.tok_s(), 1))
 
-    def finish(self, telemetry: Optional[Any], prompt_tokens: int) -> None:
+    def finish(self, request_id: str, telemetry: Any | None = None,
+               prompt_tokens: int = 0) -> None:
         with self._lock:
-            lv = self._live
+            lv = self._sessions.pop(request_id, None)
+            if telemetry is None:
+                telemetry = self._session_tel.pop(request_id, None)
+            else:
+                self._session_tel.pop(request_id, None)
+            if lv is None:
+                return
             elapsed = lv.elapsed()
             tok_s = lv.tok_s()
             summary = telemetry.summary() if telemetry is not None else {}
@@ -97,32 +112,29 @@ class TelemetryStore:
             for src, n in (summary.get("source_mix") or {}).items():
                 self.tokens_by_source[src] = self.tokens_by_source.get(src, 0) + n
             self.verification_passes += summary.get("verification_passes", lv.tokens)
-            self.accepted_from_draft += int(
-                summary.get("draft_acceptance_rate", 0)
-                * max(0, summary.get("verification_passes", 0))
-            )
+            self.accepted_from_draft += summary.get("draft_tokens_accepted", 0)
             self.pruned_positions += summary.get("pruned_draft_positions", 0)
             # Only Orthrus modes feed the AR-vs-diffusion speedup estimate.
             if lv.mode == "diffusion":
                 self._diff_tps.append(tok_s)
             elif lv.mode == "ar":
                 self._ar_tps.append(tok_s)
+            app = summary.get("accepted_tokens_per_verification_pass",
+                              1.0 if lv.mode != "proxy" else None)
+            acc = summary.get("draft_acceptance_rate", 0.0)
             self._history.appendleft({
                 "request_id": lv.request_id,
                 "mode": lv.mode,
                 "tokens": lv.tokens,
                 "tok_s": round(tok_s, 1),
                 "ms": round(elapsed * 1000),
-                "accepted_per_pass": round(summary.get(
-                    "accepted_tokens_per_verification_pass", lv.accepted_per_pass), 2),
-                "acceptance_rate": round(summary.get(
-                    "draft_acceptance_rate", lv.acceptance_rate), 3),
+                "accepted_per_pass": round(app, 2) if app is not None else None,
+                "acceptance_rate": round(acc, 3),
                 "prompt_preview": lv.prompt_preview,
                 "prompt_tokens": prompt_tokens,
                 "pruned": summary.get("pruned_draft_positions", 0),
                 "ar_lane_steps": summary.get("ar_lane_steps", 0),
             })
-            self._live = _Live(phase="idle")
 
     # -- dashboard read --------------------------------------------------- #
     def _baseline(self) -> float:
@@ -130,22 +142,32 @@ class TelemetryStore:
             return sum(self._ar_tps) / len(self._ar_tps)
         return self.baseline_tok_s
 
+    def _current(self) -> _Live | None:
+        """The most recently started session that is still running."""
+        if not self._sessions:
+            return None
+        return next(reversed(self._sessions.values()))
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            lv = self._live
+            lv = self._current()
+            tel = self._session_tel.get(lv.request_id) if lv is not None else None
+            app = tel.accepted_tokens_per_verification_pass if tel is not None else 1.0
+            acc = tel.draft_acceptance_rate if tel is not None else 0.0
             diff_tps = (sum(self._diff_tps) / len(self._diff_tps)) if self._diff_tps else 0.0
             base = self._baseline()
             speedup = (diff_tps / base) if (base and diff_tps) else None
             return {
                 "live": {
-                    "active": lv.active,
-                    "mode": lv.mode,
-                    "phase": lv.phase,
-                    "tokens": lv.tokens,
-                    "tok_s": round(lv.tok_s(), 1),
-                    "accepted_per_pass": round(lv.accepted_per_pass, 2),
-                    "acceptance_rate": round(lv.acceptance_rate, 3),
-                    "prompt_preview": lv.prompt_preview,
+                    "active": lv is not None,
+                    "mode": lv.mode if lv else "",
+                    "phase": lv.phase if lv else "idle",
+                    "tokens": lv.tokens if lv else 0,
+                    "tok_s": round(lv.tok_s(), 1) if lv else 0.0,
+                    "accepted_per_pass": round(app, 2),
+                    "acceptance_rate": round(acc, 3),
+                    "prompt_preview": lv.prompt_preview if lv else "",
+                    "concurrent": len(self._sessions),
                 },
                 "totals": {
                     "requests": self.requests,

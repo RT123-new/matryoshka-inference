@@ -29,9 +29,9 @@ import os
 import re
 import sys
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator, Optional
 
 # --------------------------------------------------------------------------- #
 # Import the Orthrus MLX architecture from the sibling repo without installing
@@ -122,6 +122,8 @@ class DecodeTelemetry:
                 self.accepted_tokens_per_verification_pass, 4
             ),
             "draft_acceptance_rate": round(self.draft_acceptance_rate, 4),
+            "draft_tokens_proposed": sum(s.proposed for s in self.steps),
+            "draft_tokens_accepted": sum(s.accepted for s in self.steps),
             "source_mix": self.source_mix(),
             "pruned_draft_positions": sum(s.pruned for s in self.steps),
             "ar_lane_steps": sum(1 for s in self.steps if s.source == "ar"),
@@ -204,7 +206,7 @@ class BlockPolicy:
         self._cur = block_size
         self._backoff = 0
 
-    def _rolling(self) -> Optional[float]:
+    def _rolling(self) -> float | None:
         if not self._acc:
             return None
         return sum(self._acc) / len(self._acc)
@@ -327,7 +329,7 @@ class CopyProposer:
             if i + 1 >= self.ngram:
                 self._index.setdefault(self._key(i), []).append(i)
 
-    def propose(self, want: int) -> Optional[list[int]]:
+    def propose(self, want: int) -> list[int] | None:
         n = len(self._tokens)
         if n < self.ngram or want <= 0:
             return None
@@ -427,10 +429,10 @@ def orthrus_generate(
     eos_token_id,
     max_tokens: int = 256,
     temperature: float = 0.0,
-    policy: Optional[BlockPolicy] = None,
-    copy_proposer: Optional[CopyProposer] = None,
-    detokenize: Optional[Callable[[list[int]], str]] = None,
-    prune_tau: Optional[float] = None,
+    policy: BlockPolicy | None = None,
+    copy_proposer: CopyProposer | None = None,
+    detokenize: Callable[[list[int]], str] | None = None,
+    prune_tau: float | None = None,
 ):
     """Instrumented dual-view (+ optional copy) speculative decode.
 
@@ -471,7 +473,9 @@ def orthrus_generate(
         bs = policy.next_block_size(
             recent_text=recent, last_entropy=last_entropy, in_think=in_think
         )
-        bs = min(bs, max_tokens - tel.tokens_generated + 1)
+        # A block of size bs emits at most bs tokens (accepted + 1 correction),
+        # so cap it at the remaining budget or generation overshoots max_tokens.
+        bs = min(bs, max_tokens - tel.tokens_generated)
 
         # --- scheduler AR lane: plain decode step, no draft pass ------------ #
         if bs <= 1:
@@ -536,7 +540,9 @@ def orthrus_generate(
         t_list = ar_tokens[0].tolist()
 
         accepted = 0
-        for d, t in zip(d_list, t_list[:-1]):
+        # zip stops at the shorter list on purpose: t_list has one extra
+        # element (the correction token past the last draft position).
+        for d, t in zip(d_list, t_list[:-1], strict=False):
             if d == t:
                 accepted += 1
             else:
@@ -577,5 +583,5 @@ def orthrus_generate(
             tokens.append(t)
             tel.tokens_generated += 1
             yield t, tel
-            if t == eos_token_id:
+            if t == eos_token_id or tel.tokens_generated >= max_tokens:
                 return

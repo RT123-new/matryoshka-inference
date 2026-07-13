@@ -39,7 +39,8 @@ def score_answer(answer: str, task: BenchmarkTask) -> ScoreResult:
         )
 
     aliases = [_normalize(alias) for alias in task.answer_aliases]
-    exact_or_alias = normalized_gold in normalized_answer or any(alias and alias in normalized_answer for alias in aliases)
+    exact_or_alias = normalized_gold in normalized_answer or any(
+        alias and alias in normalized_answer for alias in aliases)
 
     must_include = [_normalize(item) for item in task.must_include]
     if must_include:

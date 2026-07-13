@@ -22,7 +22,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from sclab import __version__
+
     parser = argparse.ArgumentParser(prog="sclab", description="Semantic Compression Lab CLI")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan = subparsers.add_parser("scan", help="Detect hardware and local runtimes")
@@ -158,7 +161,12 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     runtime = get_runtime(args.runtime)
     if not runtime.is_available():
         print(f"Warning: runtime {args.runtime!r} did not report available; benchmark will surface runtime errors.")
-    runtime_options = json.loads(args.runtime_options) if args.runtime_options else {}
+    try:
+        runtime_options = json.loads(args.runtime_options) if args.runtime_options else {}
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--runtime-options is not valid JSON: {exc}") from None
+    if not isinstance(runtime_options, dict):
+        raise SystemExit("--runtime-options must be a JSON object, e.g. '{\"mode\":\"diffusion\"}'")
     config = BenchmarkConfig(
         runtime=args.runtime,
         model=args.model,
@@ -189,7 +197,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
 def cmd_single(args: argparse.Namespace) -> int:
     runtime = get_runtime(args.runtime)
     document_path = Path(args.document)
-    document = document_path.read_text(encoding="utf-8", errors="replace")
+    document = _read_document(document_path)
     out_dir = Path(args.out or f"runs/single_{int(time.time())}")
     out_dir.mkdir(parents=True, exist_ok=True)
     dataset_path = out_dir / "single_task.jsonl"
@@ -225,7 +233,12 @@ def cmd_single(args: argparse.Namespace) -> int:
 
 
 def cmd_ablate(args: argparse.Namespace) -> int:
-    budgets = [float(value) for value in _split_csv(args.budgets)]
+    try:
+        budgets = [float(value) for value in _split_csv(args.budgets)]
+    except ValueError:
+        raise SystemExit(f"--budgets must be comma-separated numbers, got: {args.budgets!r}") from None
+    if not budgets:
+        raise SystemExit("--budgets is empty; pass e.g. 0.2,0.4,0.6")
     root = Path(args.out or f"runs/ablate_{args.compressor}_{int(time.time())}")
     root.mkdir(parents=True, exist_ok=True)
     runtime = get_runtime(args.runtime)
@@ -265,20 +278,25 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 def cmd_compress(args: argparse.Namespace) -> int:
     import sys
 
-    text = Path(args.document).read_text(encoding="utf-8", errors="replace")
+    text = _read_document(Path(args.document))
     compressor = get_compressor(args.compressor, budget=args.budget)
     result = compressor.compress(Document(text=text), args.question)
     print(result.compressed_text)
     if args.stats:
+        ratio = (
+            f"{result.compression_ratio_tokens:.0%}"
+            if result.compression_ratio_tokens is not None else "n/a"
+        )
         print(
             f"[{compressor.name}] {result.original_tokens} -> {result.compressed_tokens} tokens "
-            f"({result.compression_ratio_tokens:.0%})",
+            f"({ratio})",
             file=sys.stderr,
         )
     return 0
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    from sclab.proxy import discover_ollama_model
     from sclab.server import serve as run_server
 
     backend = args.backend
@@ -287,14 +305,31 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # Smart defaults so `sclab up` just works:
     if backend == "auto" and not upstream and not model:
         # No model given -> if an Ollama model is running, proxy it; else Orthrus 4B.
-        from sclab.proxy import discover_ollama_model
-
         found = discover_ollama_model()
         if found:
             backend, upstream, model = "proxy", "http://localhost:11434/v1", found
             print(f"Auto-detected Ollama model '{found}' — proxying it (model-agnostic mode).")
         else:
             model = "orthrus-qwen3-4b"
+    elif backend == "proxy":
+        # Explicit proxy: default the upstream to local Ollama, and pick its
+        # first model when none was named, so `sclab serve --backend proxy`
+        # works with zero extra flags.
+        if not upstream:
+            upstream = "http://localhost:11434/v1"
+            print(f"No --upstream given — defaulting to Ollama at {upstream}")
+        if not model:
+            from sclab.proxy import list_models
+
+            listed = list_models(upstream, args.api_key) or {}
+            ids = [m.get("id") for m in listed.get("data") or [] if m.get("id")]
+            model = ids[0] if ids else None
+            if not model:
+                raise SystemExit(
+                    "proxy backend needs a model: pass --model, or start the upstream "
+                    "so one can be auto-detected."
+                )
+            print(f"Auto-detected upstream model '{model}'.")
     elif not model:
         model = "orthrus-qwen3-4b"
 
@@ -311,7 +346,7 @@ def cmd_hermes_config(args: argparse.Namespace) -> int:
     base = f"http://{args.host}:{args.port}/v1"
     print("Add a Custom OpenAI-compatible provider in Hermes desktop with:\n")
     print(f"  Base URL:  {base}")
-    print(f"  API key:   local            (any value — it is not checked)")
+    print("  API key:   local            (any value — it is not checked)")
     print(f"  Model:     {args.model}\n")
     print("Config file (if you edit it directly): ~/.hermes/config.yaml\n")
     print("providers:")
@@ -362,8 +397,8 @@ def cmd_ab(args: argparse.Namespace) -> int:
     report = Path(out) / "report.html"
     print(f"\nAvg {label}: {sp:.2f}x  ·  report: {report.resolve()}")
     if args.open_report:
-        import subprocess
-        subprocess.run(["open", str(report)], check=False)
+        import webbrowser
+        webbrowser.open(report.resolve().as_uri())
     return 0
 
 
@@ -404,12 +439,12 @@ def cmd_hermes_connect(args: argparse.Namespace) -> int:
     print(f"  Hermes base_url:  {current}  ->  {proxy_url}")
     print(f"  Backup saved to:  {bak}\n")
     print("Next:")
-    print(f"  1. Start the proxy in front of your existing endpoint:")
+    print("  1. Start the proxy in front of your existing endpoint:")
     print(f"       sclab serve --backend proxy --upstream {current} --port {args.port} --open")
-    print(f"  2. Fully quit and reopen Hermes so it reloads the config.")
-    print(f"  3. Chat as usual — the dashboard lights up on every turn.\n")
+    print("  2. Fully quit and reopen Hermes so it reloads the config.")
+    print("  3. Chat as usual — the dashboard lights up on every turn.\n")
     print(f"  Dashboard:  http://127.0.0.1:{args.port}/dashboard")
-    print(f"  Disconnect: sclab hermes-connect --revert   (then restart Hermes)")
+    print("  Disconnect: sclab hermes-connect --revert   (then restart Hermes)")
     print("\n  Note: keep the proxy running while connected — if it stops, Hermes")
     print("  cannot reach the endpoint until you revert.")
     return 0
@@ -417,6 +452,13 @@ def cmd_hermes_connect(args: argparse.Namespace) -> int:
 
 def _split_csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _read_document(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise SystemExit(f"Could not read document {path}: {exc}") from None
 
 
 def compare_raw_and_compressed(

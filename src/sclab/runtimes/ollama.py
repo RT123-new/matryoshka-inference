@@ -52,6 +52,7 @@ class OllamaRuntime(ApproxTokenCounterMixin):
         first_token_s: float | None = None
         chunks: list[str] = []
         final_metadata: dict[str, Any] = {}
+        stream_error: str | None = None
         try:
             with requests.post(
                 f"{self.base_url}/api/generate",
@@ -63,7 +64,15 @@ class OllamaRuntime(ApproxTokenCounterMixin):
                 for line in response.iter_lines(decode_unicode=True):
                     if not line:
                         continue
-                    event = json.loads(line)
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("error"):
+                        # Ollama reports mid-stream failures (model OOM, ...)
+                        # as an error event on a 200 response.
+                        stream_error = str(event["error"])
+                        break
                     piece = event.get("response") or ""
                     if piece and first_token_s is None:
                         first_token_s = time.perf_counter() - start
@@ -84,6 +93,21 @@ class OllamaRuntime(ApproxTokenCounterMixin):
                 decode_time_s=None,
                 decode_tokens_per_s=None,
                 raw_metadata={"error": str(exc), "payload_model": request.model},
+            )
+
+        if stream_error is not None:
+            return GenerationResult(
+                text="",
+                model=request.model,
+                runtime=self.name,
+                prompt_tokens=None,
+                completion_tokens=None,
+                total_time_s=time.perf_counter() - start,
+                time_to_first_token_s=first_token_s,
+                prompt_eval_time_s=None,
+                decode_time_s=None,
+                decode_tokens_per_s=None,
+                raw_metadata={"error": stream_error, "payload_model": request.model},
             )
 
         total_time = time.perf_counter() - start

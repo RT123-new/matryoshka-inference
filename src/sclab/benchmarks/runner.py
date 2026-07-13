@@ -12,7 +12,6 @@ from sclab.benchmarks.scoring import ScoreResult, score_answer
 from sclab.compressors import Document, get_compressor
 from sclab.hardware import scan_hardware
 from sclab.runtimes.base import GenerationRequest, GenerationResult
-from sclab.tokenization import count_tokens
 from sclab.utils.jsonl import write_jsonl
 
 RAW_PROMPT = """You are answering from the provided source text.
@@ -149,7 +148,9 @@ class BenchmarkRunner:
                     and not result.raw_metadata.get("error")
                 )
                 if not passed and not failure_reasons:
-                    failure_reasons.extend(_pass_fail_reasons(score.quality_score, result.total_time_s, raw_result.total_time_s, prompt_tokens, raw_prompt_tokens))
+                    failure_reasons.extend(_pass_fail_reasons(
+                        score.quality_score, result.total_time_s, raw_result.total_time_s,
+                        prompt_tokens, raw_prompt_tokens))
                 record = {
                     "task_id": task.id,
                     "task_type": task.type,
@@ -185,7 +186,9 @@ class BenchmarkRunner:
                 rows.append(record)
                 self._write_example(run_dir, task, compressor.name, compression.compressed_text)
             except Exception as exc:
-                rows.append(_exception_record(task, config, self.runtime.name, compressor_name, raw_result, raw_prompt_tokens, exc))
+                rows.append(_exception_record(
+                    task, config, self.runtime.name, compressor_name,
+                    raw_result, raw_prompt_tokens, exc))
         return rows
 
     def _generate(self, task: BenchmarkTask, config: BenchmarkConfig, prompt: str) -> GenerationResult:
