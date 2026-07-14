@@ -63,12 +63,17 @@ class SimEngine:
 
     def __init__(self, lm: LagLM | None = None, overhead_ms: float = 0.0,
                  prefill_ms_per_token: float = 0.0, decode_ms_per_token: float = 0.0,
-                 max_total_tokens: int = 100_000) -> None:
+                 max_total_tokens: int = 100_000, logprob_shift: int = 0) -> None:
         self.lm = lm or LagLM()
         self.overhead_ms = overhead_ms
         self.prefill_ms_per_token = prefill_ms_per_token
         self.decode_ms_per_token = decode_ms_per_token
         self.max_total_tokens = max_total_tokens
+        # 0 = classic OpenAI convention (index i predicts token i); 1 = the
+        # llama-cpp-python convention (index i reports the model's logits *after*
+        # token i, i.e. predicts token i+1). Lets tests exercise both alignments
+        # deterministically without a real engine.
+        self.logprob_shift = logprob_shift
         self._cache_text = ""   # cache_prompt-style single-slot prefix cache
         self._lock = threading.Lock()
 
@@ -116,21 +121,34 @@ class SimEngine:
             # engine would see it (seam merges included).
             full_toks = tokenize(prompt + gen_text)
             all_surfaces = [t for t, _ in full_toks]
-            start_idx = 0 if echo else n_prompt
+            shift = self.logprob_shift
             base = 0 if echo else len(prompt)
+            if echo:
+                # Classic engines echo the sent tokens *and* the generated tail;
+                # the shifted (llama-cpp-python) convention echoes only the sent
+                # tokens and carries the bonus in the last position's prediction.
+                start_idx = 0
+                end_idx = len(full_toks) if shift == 0 else n_prompt
+            else:
+                start_idx, end_idx = n_prompt, len(full_toks)
             tokens_out: list[str] = []
             offsets: list[int] = []
             lps: list[float | None] = []
             tops: list[dict | None] = []
-            for idx in range(start_idx, len(full_toks)):
+            for idx in range(start_idx, end_idx):
                 surface, offset = full_toks[idx]
                 tokens_out.append(surface)
                 offsets.append(offset - base)
                 if idx == 0:
+                    # Both conventions null the very first position.
                     lps.append(None)
                     tops.append(None)
                     continue
-                top = self.lm.top1(all_surfaces, idx)
+                # Response index i reports the model's logits after token
+                # (i - shift), i.e. the prediction for position (i - shift) + ...
+                # equivalently top_logprobs[i] is the distribution for token
+                # i + shift. See verify._parse_logprobs.
+                top = self.lm.top1(all_surfaces, idx + shift)
                 lps.append(-0.05 if surface == top else -6.0)
                 tops.append({top: -0.05})
             choice["logprobs"] = {"tokens": tokens_out, "token_logprobs": lps,

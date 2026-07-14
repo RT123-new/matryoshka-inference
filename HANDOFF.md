@@ -58,11 +58,23 @@ need to be inside the engine** — you need one thing the engine already exposes
 
 ## 3. The universal primitive — generation *is* scoring
 
-Every autoregressive engine can answer one question through its public API:
+Every autoregressive engine can *in principle* answer one question through its
+public API:
 
 > "For this exact text, at each position, what is your most likely next token?"
 
 That's the OpenAI **legacy completions** call with `echo=true` + `logprobs`.
+
+> **Phase 1 reality check** (see [`docs/spec_phase1_results.md`](docs/spec_phase1_results.md)):
+> "in principle" is doing real work here. Not every OpenAI-compatible engine
+> actually answers it — the current native `llama.cpp` `llama-server` ignores
+> `echo` and returns generated-token logprobs only. And an engine that returns
+> the right *shape* may not return the right *semantics*: `llama-cpp-python`'s
+> per-position logprobs are **shifted by one**. So the primitive must be
+> **probed and its alignment measured** per engine, never assumed — and the
+> guarantee below holds for **raw-argmax greedy** decoding specifically (all
+> penalties/sampling off), because that is the only policy the scored top-1 can
+> verify.
 For **greedy** decoding, the most-likely token at a position *is* the token the
 engine would generate there. So:
 
@@ -163,6 +175,14 @@ model clearly labeled — the point is the **shape** (breakeven ≈ 1), which is
 property of parallel-prefill-vs-sequential-decode on bandwidth-bound hardware,
 not of any particular model. §7 is how we replace them with real ones.
 
+> **These remain simulated.** Phase 1 (see
+> [`docs/spec_phase1_results.md`](docs/spec_phase1_results.md)) could not
+> reproduce breakeven ≈ 1 on its rig: with no GPU and only a tiny CPU model, the
+> measured breakeven was **10–74**, and speculation ran *slower* than plain
+> generation — correctly, because that regime is not bandwidth-bound. The 2.9×
+> and breakeven≈1 above are properties of the modeled latency, not a measured
+> result on a real model. Reproducing them needs a bandwidth-bound decoder.
+
 ---
 
 ## 6. The critical finding — tokenization boundaries (kept visible)
@@ -198,17 +218,26 @@ monolithic-call equivalence is §7 Phase 2: **token-ID-level speculation.**
 Prototype, sim, tests, `spec-bench`. Universal, lossless-by-construction at the
 text level, measured on the sim.
 
-### Phase 1 — prove it on real engines (days)
-Point `spec-bench` at real local servers and record real numbers, honestly, the
-way the repo already documents Orthrus:
-- **llama.cpp** `server` (`echo` + `logprobs` + `cache_prompt`) — the reference
-  target; prefix caching makes each verify round prefill only the new draft.
-- **vLLM** (`echo` + `prompt_logprobs`, automatic prefix caching).
-- Workloads that matter: agent tool-call loops, RAG answers that quote context,
-  code editing (huge verbatim reuse), JSON/structured output.
-Deliverable: `docs/spec_phase1_results.md` with real speedups + acceptance, and
-the negative cases (free-form prose, where drafts don't land and the backoff
-must keep it at ~1.0× — never slower).
+### Phase 1 — prove it on real engines — **DONE (with corrections); see [`docs/spec_phase1_results.md`](docs/spec_phase1_results.md)**
+Outcome, honestly:
+- **Correctness survived and is now proven on a real engine** (`llama-cpp-python`
+  0.3.16) — byte-identical to plain raw-argmax greedy generation, with real
+  draft acceptance — **but only after finding and fixing a genuine bug**:
+  `llama-cpp-python` returns prompt logprobs **shifted by +1** from the classic
+  convention the parser assumed (API *shape* ≠ API *semantics*). The parser now
+  takes a measured `shift`, and `verify.probe_endpoint` measures it per endpoint.
+- **The primitive is not universal.** The current native **`llama.cpp`
+  `llama-server`** does **not** expose it — `echo` is ignored and only
+  generated-token logprobs come back (no `text_offset`). `spec-bench` now probes
+  and refuses to speculate on unusable endpoints. **vLLM was not tested** (no
+  GPU); do not assume it.
+- **Speed is unproven here.** The Phase 1 rig had no GPU and no trained model
+  (Hugging Face was egress-blocked), only a tiny CPU model on a synthetic
+  fixture. On it, decode is cheap and per-round overhead high, so the
+  breakeven≈1 physics does **not** reproduce and speculation is *slower* than
+  plain generation despite perfect correctness. The backoff does **not**
+  guarantee ~1× on overhead-dominated engines. A wall-clock win needs a
+  bandwidth-bound decoder (large model / GPU) — the recommended next experiment.
 
 ### Phase 2 — token-ID mode for unconditional equivalence (1–2 weeks)
 For engines that accept token-ID prompts and return per-token logprobs
@@ -262,11 +291,12 @@ audit on every single request.
 
 | Risk | Mitigation in code today |
 |---|---|
-| Silent quality loss | Losslessness proven in CI; seam cases fall back, never guess |
-| Slower on unspeculable prose | DSpark-style backoff → floor at ~1.0×, measured |
-| Engine lacks `echo`/`logprobs` | Detect and fall back to plain proxy (no regression) |
-| Tokenization seams | Detector + short-burst step-past; Phase 2 removes them |
-| Overhead per round-trip | Cost probe measures breakeven per engine before trusting it |
+| Silent quality loss | Losslessness proven in CI **and on a real engine**; conservative tie-safe accept; seam cases fall back, never guess |
+| **API shape ≠ semantics** (logprob alignment shift) | `probe_endpoint` **measures** the shift per engine; loop diverges at the wrong one (tested). Found on llama-cpp-python (+1) — see Phase 1 doc |
+| Engine lacks `echo`/prompt-logprobs | `probe_endpoint` classifies it unusable → plain generation, never mis-verified. Native `llama-server` fails this today |
+| Slower on unspeculable / overhead-bound engine | Backoff floors round-*count*, **not** wall-clock: measured ~3× slower on a tiny CPU model. Needs a bandwidth-bound decoder to win — not guaranteed |
+| Tokenization seams | Detector + short-burst step-past; Phase 2 (token-ID mode) removes them |
+| Overhead per round-trip | Cost probe measures breakeven per engine before trusting it; on the Phase 1 rig breakeven was 10–74, not ~1 |
 
 ---
 

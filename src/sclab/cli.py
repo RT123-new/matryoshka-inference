@@ -145,11 +145,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     spec = subparsers.add_parser(
         "spec-bench",
-        help="Universal API-level verified speculation: baseline vs spec on any "
-             "OpenAI-compatible /v1/completions engine (experimental)")
+        help="API-level verified speculation: probe an OpenAI-compatible "
+             "/v1/completions engine, then baseline vs spec if it qualifies (experimental)")
     spec.add_argument("--upstream", default=None,
-                      help="Engine base URL, e.g. http://localhost:8080/v1 (llama.cpp), "
-                           "http://localhost:8000/v1 (vLLM). Omit with --sim for a local demo.")
+                      help="Engine base URL, e.g. http://localhost:8080/v1. Must expose echo + "
+                           "prompt logprobs (llama-cpp-python does; native llama-server does not). "
+                           "Omit with --sim for a local demo.")
     spec.add_argument("--api-key", default="")
     spec.add_argument("--model", default=None, help="Model name the engine serves")
     spec.add_argument("--prompt", default=None, help="Prompt text (or use --prompt-file)")
@@ -168,6 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Run against the built-in deterministic sim engine (no real model needed)")
     spec.add_argument("--sim-decode-ms", type=float, default=20.0,
                       help="Sim only: modeled per-token sequential decode cost (ms)")
+    spec.add_argument("--sim-shift", type=int, default=0, choices=(0, 1),
+                      help="Sim only: logprob convention to emulate (0=classic/OpenAI, "
+                           "1=shifted/llama-cpp-python). The probe should detect either.")
     spec.set_defaults(func=cmd_spec_bench)
 
     return parser
@@ -479,6 +483,7 @@ def cmd_hermes_connect(args: argparse.Namespace) -> int:
 
 def cmd_spec_bench(args: argparse.Namespace) -> int:
     from sclab.spec.bench import format_bench, format_cost_probe, run_bench, run_cost_probe
+    from sclab.spec.verify import probe_endpoint
 
     sim_server = None
     upstream, model = args.upstream, args.model
@@ -487,11 +492,13 @@ def cmd_spec_bench(args: argparse.Namespace) -> int:
 
         engine = SimEngine(lm=LagLM(lag=10), overhead_ms=2,
                            prefill_ms_per_token=args.sim_decode_ms / 10.0,
-                           decode_ms_per_token=args.sim_decode_ms)
+                           decode_ms_per_token=args.sim_decode_ms,
+                           logprob_shift=args.sim_shift)
         sim_server, upstream = start_sim_server(engine)
         model = model or "sim-lag-lm"
         print(f"Using built-in sim engine at {upstream} "
-              f"(modeled decode {args.sim_decode_ms:.0f} ms/token — SIMULATED, not a real model).")
+              f"(modeled decode {args.sim_decode_ms:.0f} ms/token, logprob_shift={args.sim_shift} "
+              f"— SIMULATED, not a real model).")
     if not upstream:
         raise SystemExit("Pass --upstream <engine /v1 base URL>, or --sim for a local demo.")
     if not model:
@@ -508,14 +515,23 @@ def cmd_spec_bench(args: argparse.Namespace) -> int:
 
     warm = _read_document(Path(args.warm_file)) if args.warm_file else None
     try:
+        # Behavioural probe first: shape compatibility is not enough — the
+        # positional alignment must be measured, or verification is unsafe.
+        cap = probe_endpoint(upstream, args.api_key, model)
+        print(f"capability probe: {cap.status} "
+              f"(usable={cap.usable}, shift={cap.shift}) — {cap.detail}")
+        if not cap.usable:
+            print("This endpoint cannot verify drafts through its public API; "
+                  "speculation is disabled and only plain generation is possible.")
+
         result = run_bench(upstream, args.api_key, model, prompt,
                            max_tokens=args.max_tokens, draft_chars=args.draft_chars,
-                           burst_tokens=args.burst_tokens, warm_text=warm)
+                           burst_tokens=args.burst_tokens, warm_text=warm, capability=cap)
         print(format_bench(result))
-        if not result.get("error") and not result.get("identical_output"):
-            print("\nWARNING: spec output differed from the plain baseline — see "
-                  "the tokenization-boundary notes in HANDOFF.md.")
-        if args.cost_probe and not result.get("error"):
+        if result.get("spec_available") and not result.get("identical_output"):
+            print("\nWARNING: spec output differed from the plain baseline. This is a "
+                  "correctness failure — do not trust any speed number for it.")
+        if args.cost_probe and cap.usable and not result.get("error"):
             print("\n" + format_cost_probe(run_cost_probe(upstream, args.api_key, model, prompt)))
     finally:
         if sim_server is not None:
