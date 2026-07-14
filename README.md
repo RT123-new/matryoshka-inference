@@ -46,6 +46,13 @@ long input ──[semantic compressor]──► short prompt      (attacks PREFI
 4. A **copy proposer** (CopySpec-style) serves repeated spans (JSON, templates)
    without even paying the draft pass.
 
+> **Experimental — the universal path.** Levers 2–4 are lossless but MLX-only.
+> `sclab spec-bench` prototypes the same propose→verify guarantee through *any*
+> OpenAI-compatible engine's public API (`echo`+`logprobs` scoring), with no
+> draft model and no special checkpoint — so lossless speculation can become
+> model- and runtime-agnostic. Try `sclab spec-bench --sim --cost-probe` (no
+> model needed); the design and roadmap are in [`HANDOFF.md`](HANDOFF.md).
+
 ## Install
 
 ```bash

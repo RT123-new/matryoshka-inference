@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added — universal API-level verified speculation (experimental)
+
+- New `sclab.spec` package: lossless speculative decoding through *any*
+  OpenAI-compatible `/v1/completions` engine, with **no draft model, no engine
+  patch, and no special checkpoint**. Drafts come from a zero-cost text lookup
+  memory (`LookupMemory`); verification is one `echo`+`logprobs` scoring
+  round-trip that proves each draft token equals the engine's own greedy
+  choice. Every emitted token is the engine's greedy token by construction, so
+  output is byte-identical to plain decoding.
+- `sclab spec-bench` CLI: baseline-vs-spec on a real engine, or `--sim` for an
+  instant local demo with no model. `--cost-probe` measures the engine's
+  scoring-vs-decoding breakeven (≈1.0 on memory-bandwidth-bound decoders — the
+  physics that makes the approach win).
+- Deterministic sim engine (`sclab.spec.sim`) with exact `echo`/`logprobs`
+  semantics and an optional latency model, so losslessness is proven in CI
+  with no GPU. Tests grew 56 → 105, including a byte-identity matrix over
+  workloads, draft alignments, and token budgets.
+- Full design + roadmap in [`HANDOFF.md`](HANDOFF.md): the path from this
+  prototype to a universal, model-agnostic, lossless decode accelerator folded
+  into the transparent proxy.
+
 ## 0.2.0 — 2026-07-13
 
 Robustness and correctness release for the server, proxy, and telemetry.

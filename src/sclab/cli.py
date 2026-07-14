@@ -143,6 +143,33 @@ def build_parser() -> argparse.ArgumentParser:
     hconn.add_argument("--revert", action="store_true", help="Restore Hermes' original config")
     hconn.set_defaults(func=cmd_hermes_connect)
 
+    spec = subparsers.add_parser(
+        "spec-bench",
+        help="Universal API-level verified speculation: baseline vs spec on any "
+             "OpenAI-compatible /v1/completions engine (experimental)")
+    spec.add_argument("--upstream", default=None,
+                      help="Engine base URL, e.g. http://localhost:8080/v1 (llama.cpp), "
+                           "http://localhost:8000/v1 (vLLM). Omit with --sim for a local demo.")
+    spec.add_argument("--api-key", default="")
+    spec.add_argument("--model", default=None, help="Model name the engine serves")
+    spec.add_argument("--prompt", default=None, help="Prompt text (or use --prompt-file)")
+    spec.add_argument("--prompt-file", default=None)
+    spec.add_argument("--max-tokens", type=int, default=256)
+    spec.add_argument("--draft-chars", type=int, default=64,
+                      help="Max characters proposed per verify round")
+    spec.add_argument("--burst-tokens", type=int, default=16,
+                      help="Tokens to generate per plain-decode burst when no draft is available")
+    spec.add_argument("--warm-file", default=None,
+                      help="Text to pre-load into the lookup memory (e.g. a tool schema or the "
+                           "document being quoted) so drafts land from the first token")
+    spec.add_argument("--cost-probe", action="store_true",
+                      help="Also measure the engine's scoring-vs-decoding physics (breakeven acceptance)")
+    spec.add_argument("--sim", action="store_true",
+                      help="Run against the built-in deterministic sim engine (no real model needed)")
+    spec.add_argument("--sim-decode-ms", type=float, default=20.0,
+                      help="Sim only: modeled per-token sequential decode cost (ms)")
+    spec.set_defaults(func=cmd_spec_bench)
+
     return parser
 
 
@@ -448,6 +475,52 @@ def cmd_hermes_connect(args: argparse.Namespace) -> int:
     print("\n  Note: keep the proxy running while connected — if it stops, Hermes")
     print("  cannot reach the endpoint until you revert.")
     return 0
+
+
+def cmd_spec_bench(args: argparse.Namespace) -> int:
+    from sclab.spec.bench import format_bench, format_cost_probe, run_bench, run_cost_probe
+
+    sim_server = None
+    upstream, model = args.upstream, args.model
+    if args.sim:
+        from sclab.spec.sim import LagLM, SimEngine, start_sim_server
+
+        engine = SimEngine(lm=LagLM(lag=10), overhead_ms=2,
+                           prefill_ms_per_token=args.sim_decode_ms / 10.0,
+                           decode_ms_per_token=args.sim_decode_ms)
+        sim_server, upstream = start_sim_server(engine)
+        model = model or "sim-lag-lm"
+        print(f"Using built-in sim engine at {upstream} "
+              f"(modeled decode {args.sim_decode_ms:.0f} ms/token — SIMULATED, not a real model).")
+    if not upstream:
+        raise SystemExit("Pass --upstream <engine /v1 base URL>, or --sim for a local demo.")
+    if not model:
+        raise SystemExit("Pass --model <name the engine serves>.")
+
+    if args.prompt_file:
+        prompt = _read_document(Path(args.prompt_file))
+    elif args.prompt:
+        prompt = args.prompt
+    elif args.sim:
+        prompt = "the quick brown fox jumps over the lazy dog and then the"
+    else:
+        raise SystemExit("Pass --prompt or --prompt-file.")
+
+    warm = _read_document(Path(args.warm_file)) if args.warm_file else None
+    try:
+        result = run_bench(upstream, args.api_key, model, prompt,
+                           max_tokens=args.max_tokens, draft_chars=args.draft_chars,
+                           burst_tokens=args.burst_tokens, warm_text=warm)
+        print(format_bench(result))
+        if not result.get("error") and not result.get("identical_output"):
+            print("\nWARNING: spec output differed from the plain baseline — see "
+                  "the tokenization-boundary notes in HANDOFF.md.")
+        if args.cost_probe and not result.get("error"):
+            print("\n" + format_cost_probe(run_cost_probe(upstream, args.api_key, model, prompt)))
+    finally:
+        if sim_server is not None:
+            sim_server.shutdown()
+    return 0 if not result.get("error") else 1
 
 
 def _split_csv(value: str) -> list[str]:
