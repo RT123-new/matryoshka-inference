@@ -63,7 +63,8 @@ class SimEngine:
 
     def __init__(self, lm: LagLM | None = None, overhead_ms: float = 0.0,
                  prefill_ms_per_token: float = 0.0, decode_ms_per_token: float = 0.0,
-                 max_total_tokens: int = 100_000, logprob_shift: int = 0) -> None:
+                 max_total_tokens: int = 100_000, logprob_shift: int = 0,
+                 offset_unit: str = "codepoint", report_usage: bool = True) -> None:
         self.lm = lm or LagLM()
         self.overhead_ms = overhead_ms
         self.prefill_ms_per_token = prefill_ms_per_token
@@ -74,6 +75,13 @@ class SimEngine:
         # token i, i.e. predicts token i+1). Lets tests exercise both alignments
         # deterministically without a real engine.
         self.logprob_shift = logprob_shift
+        # "codepoint" (Python string units, what llama-cpp-python actually uses)
+        # or "byte" (UTF-8 byte positions). A byte-offset endpoint must be
+        # *rejected* by the strict probe, so tests need to emulate one.
+        self.offset_unit = offset_unit
+        # When False, omit the usage block — emulates a server that returns no
+        # completion-token count, so the loop cannot budget by token counting.
+        self.report_usage = report_usage
         self._cache_text = ""   # cache_prompt-style single-slot prefix cache
         self._lock = threading.Lock()
 
@@ -138,7 +146,11 @@ class SimEngine:
             for idx in range(start_idx, end_idx):
                 surface, offset = full_toks[idx]
                 tokens_out.append(surface)
-                offsets.append(offset - base)
+                cp_off = offset - base   # code-point offset into the returned text
+                if self.offset_unit == "byte":
+                    offsets.append(len(full_text[:cp_off].encode("utf-8")))
+                else:
+                    offsets.append(cp_off)
                 if idx == 0:
                     # Both conventions null the very first position.
                     lps.append(None)
@@ -153,8 +165,13 @@ class SimEngine:
                 tops.append({top: -0.05})
             choice["logprobs"] = {"tokens": tokens_out, "token_logprobs": lps,
                                   "top_logprobs": tops, "text_offset": offsets}
-        usage = {"prompt_tokens": n_prompt, "completion_tokens": len(generated),
-                 "total_tokens": n_prompt + len(generated)}
+        if self.report_usage:
+            usage = {"prompt_tokens": n_prompt, "completion_tokens": len(generated),
+                     "total_tokens": n_prompt + len(generated)}
+        else:
+            # A server that reports no completion-token count. The loop must not
+            # guess a count from whitespace; it finishes plainly instead.
+            usage = {"prompt_tokens": n_prompt}
         return choice, usage
 
 

@@ -172,6 +172,21 @@ def build_parser() -> argparse.ArgumentParser:
     spec.add_argument("--sim-shift", type=int, default=0, choices=(0, 1),
                       help="Sim only: logprob convention to emulate (0=classic/OpenAI, "
                            "1=shifted/llama-cpp-python). The probe should detect either.")
+    spec.add_argument("--sim-offset-unit", default="codepoint", choices=("codepoint", "byte"),
+                      help="Sim only: emit code-point (accepted) or UTF-8 byte (rejected) offsets")
+    spec.add_argument("--sim-no-usage", action="store_true",
+                      help="Sim only: omit completion-token usage, to exercise the plain fallback")
+    spec.add_argument("--gguf", default=None,
+                      help="Token-ID mode: path to a LOCAL GGUF served in-process via "
+                           "llama-cpp-python. Verifies drafts on token ids, not decoded text.")
+    spec.add_argument("--model-type", default="synthetic", choices=("trained", "synthetic"),
+                      help="Token-ID mode: label recorded in results (trained vs synthetic fixture)")
+    spec.add_argument("--timed", action="store_true",
+                      help="After the correctness gate passes, run the rigorous timed benchmark")
+    spec.add_argument("--samples", type=int, default=5, help="Timed benchmark: samples per regime")
+    spec.add_argument("--save-dir", default=None,
+                      help="Directory to write machine-readable results (environment / capability "
+                           "/ correctness / benchmark JSON + raw texts)")
     spec.set_defaults(func=cmd_spec_bench)
 
     return parser
@@ -481,8 +496,28 @@ def cmd_hermes_connect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _spec_prompt(args: argparse.Namespace) -> str:
+    if args.prompt_file:
+        return _read_document(Path(args.prompt_file))
+    if args.prompt:
+        return args.prompt
+    if args.sim or args.gguf:
+        return "the quick brown fox jumps over the lazy dog and then the"
+    raise SystemExit("Pass --prompt or --prompt-file.")
+
+
 def cmd_spec_bench(args: argparse.Namespace) -> int:
-    from sclab.spec.bench import format_bench, format_cost_probe, run_bench, run_cost_probe
+    if args.gguf:
+        return cmd_spec_token(args)
+
+    from sclab.spec.bench import (
+        format_bench,
+        format_cost_probe,
+        run_bench,
+        run_cost_probe,
+        run_timed_bench,
+        save_bench_results,
+    )
     from sclab.spec.verify import probe_endpoint
 
     sim_server = None
@@ -493,33 +528,27 @@ def cmd_spec_bench(args: argparse.Namespace) -> int:
         engine = SimEngine(lm=LagLM(lag=10), overhead_ms=2,
                            prefill_ms_per_token=args.sim_decode_ms / 10.0,
                            decode_ms_per_token=args.sim_decode_ms,
-                           logprob_shift=args.sim_shift)
+                           logprob_shift=args.sim_shift, offset_unit=args.sim_offset_unit,
+                           report_usage=not args.sim_no_usage)
         sim_server, upstream = start_sim_server(engine)
         model = model or "sim-lag-lm"
         print(f"Using built-in sim engine at {upstream} "
-              f"(modeled decode {args.sim_decode_ms:.0f} ms/token, logprob_shift={args.sim_shift} "
+              f"(modeled decode {args.sim_decode_ms:.0f} ms/token, logprob_shift={args.sim_shift}, "
+              f"offset_unit={args.sim_offset_unit}, usage={'off' if args.sim_no_usage else 'on'} "
               f"— SIMULATED, not a real model).")
     if not upstream:
         raise SystemExit("Pass --upstream <engine /v1 base URL>, or --sim for a local demo.")
     if not model:
         raise SystemExit("Pass --model <name the engine serves>.")
 
-    if args.prompt_file:
-        prompt = _read_document(Path(args.prompt_file))
-    elif args.prompt:
-        prompt = args.prompt
-    elif args.sim:
-        prompt = "the quick brown fox jumps over the lazy dog and then the"
-    else:
-        raise SystemExit("Pass --prompt or --prompt-file.")
-
+    prompt = _spec_prompt(args)
     warm = _read_document(Path(args.warm_file)) if args.warm_file else None
     try:
         # Behavioural probe first: shape compatibility is not enough — the
         # positional alignment must be measured, or verification is unsafe.
         cap = probe_endpoint(upstream, args.api_key, model)
         print(f"capability probe: {cap.status} "
-              f"(usable={cap.usable}, shift={cap.shift}) — {cap.detail}")
+              f"(usable={cap.usable}, shift={cap.shift}, offset_unit={cap.offset_unit}) — {cap.detail}")
         if not cap.usable:
             print("This endpoint cannot verify drafts through its public API; "
                   "speculation is disabled and only plain generation is possible.")
@@ -531,12 +560,96 @@ def cmd_spec_bench(args: argparse.Namespace) -> int:
         if result.get("spec_available") and not result.get("identical_output"):
             print("\nWARNING: spec output differed from the plain baseline. This is a "
                   "correctness failure — do not trust any speed number for it.")
+
+        timed = None
+        if args.timed and cap.usable and result.get("identical_output"):
+            print("\ncorrectness gate passed → running rigorous timed benchmark...")
+            timed = run_timed_bench(upstream, args.api_key, model, prompt, cap,
+                                    max_tokens=args.max_tokens, samples=args.samples,
+                                    draft_chars=args.draft_chars, burst_tokens=args.burst_tokens,
+                                    warm_text=warm)
+            print(json.dumps(timed, indent=2))
+        elif args.timed:
+            print("\ntimed benchmark SKIPPED: correctness gate not passed "
+                  "(no speed claim without byte-identity first).")
+
         if args.cost_probe and cap.usable and not result.get("error"):
             print("\n" + format_cost_probe(run_cost_probe(upstream, args.api_key, model, prompt)))
+
+        if args.save_dir:
+            written = save_bench_results(
+                args.save_dir,
+                environment={"mode": "text_surface", "sim": bool(args.sim), "model": model,
+                             "max_tokens": args.max_tokens},
+                capability={"status": cap.status, "usable": cap.usable, "shift": cap.shift,
+                            "offset_unit": cap.offset_unit, "detail": cap.detail},
+                correctness={"identical_output": result.get("identical_output"),
+                             "spec_available": result.get("spec_available"),
+                             "stats": result.get("spec")},
+                benchmark=timed,
+                raw_texts={"baseline": result.get("baseline_text", ""),
+                           "spec": result.get("spec_text", "")},
+            )
+            print(f"\nsaved results: {', '.join(sorted(written))}")
     finally:
         if sim_server is not None:
             sim_server.shutdown()
     return 0 if not result.get("error") else 1
+
+
+def cmd_spec_token(args: argparse.Namespace) -> int:
+    """Token-ID mode: verify drafts on token ids via an in-process GGUF backend."""
+    from sclab.spec.bench import save_bench_results
+    from sclab.spec.memory import LookupMemory
+    from sclab.spec.token_verify import spec_generate_tokens
+
+    try:
+        from sclab.spec.llamacpp_backend import LlamaCppBackend
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise SystemExit(f"token-ID mode needs llama-cpp-python: {exc}") from None
+
+    if not Path(args.gguf).exists():
+        raise SystemExit(f"GGUF not found: {args.gguf}")
+    print(f"Loading GGUF in-process (model-type={args.model_type}): {Path(args.gguf).name}")
+    backend = LlamaCppBackend.from_model_path(args.gguf, n_ctx=max(4096, args.max_tokens * 4))
+    cap = backend.capability()
+    print(f"token-ID capability: {cap.mode} (usable={cap.usable}) — {cap.detail}")
+
+    prompt = _spec_prompt(args)
+    prompt_ids = backend.encode_context(prompt)
+    base = backend.generate_plain(prompt_ids, args.max_tokens)
+    if base.error:
+        raise SystemExit(f"plain generation failed: {base.error}")
+    base_bytes = backend.decode_tokens(base.token_ids)
+
+    mem = LookupMemory()
+    if args.warm_file:
+        mem.observe(_read_document(Path(args.warm_file)))
+    gen = spec_generate_tokens(backend, prompt, max_tokens=args.max_tokens, memory=mem,
+                               capability=cap, draft_chars=args.draft_chars,
+                               burst_tokens=args.burst_tokens)
+    id_ok = gen.token_ids == base.token_ids
+    byte_ok = gen.text_bytes == base_bytes
+    print(f"correctness gate: token-id equal={id_ok}, byte equal={byte_ok}  "
+          f"({len(gen.token_ids)} tok, {gen.stats.token_id_verify_rounds} verify rounds, "
+          f"{gen.stats.draft_ids_accepted} draft ids accepted)")
+    if not (id_ok and byte_ok):
+        print("WARNING: token-ID output diverged from plain generation — a correctness "
+              "failure. No speed number is valid.")
+
+    if args.save_dir:
+        written = save_bench_results(
+            args.save_dir,
+            environment={"mode": "token_id", "backend": "llama-cpp-python (in-process)",
+                         "model_type": args.model_type, "max_tokens": args.max_tokens},
+            capability={"mode": cap.mode, "usable": cap.usable, "deterministic": cap.deterministic,
+                        "policy": cap.policy, "detail": cap.detail},
+            correctness={"token_id_equal": id_ok, "byte_equal": byte_ok, "stats": gen.stats.summary()},
+            raw_texts={"baseline": base_bytes.decode("utf-8", errors="replace"),
+                       "spec": gen.text},
+        )
+        print(f"saved results: {', '.join(sorted(written))}")
+    return 0 if (id_ok and byte_ok) else 1
 
 
 def _split_csv(value: str) -> list[str]:

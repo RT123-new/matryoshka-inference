@@ -34,6 +34,8 @@ loop falls back to plain generation. Engines with prefix caching (llama.cpp
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -240,20 +242,37 @@ def generate_burst(upstream: str, api_key: str, model: str, prompt: str,
 
 
 # --------------------------------------------------------------------------- #
-# Capability probe — behaviour, not field names.
+# Capability probe — strict behaviour, every invariant load-bearing.
 # --------------------------------------------------------------------------- #
 
-# Endpoint classification. Only the two ``verified_*`` states are safe to
-# speculate against; everything else must fall back to plain generation.
-CAP_CLASSIC = "verified_classic_alignment"     # index i predicts token i (shift 0)
-CAP_SHIFTED = "verified_shifted_alignment"     # index i predicts token i+1 (shift 1)
-CAP_ECHO_IGNORED = "echo_ignored"              # prompt not echoed back
-CAP_GENERATED_ONLY = "generated_logprobs_only"  # logprobs cover generated tokens only
-CAP_BAD_SHAPE = "unsupported_response_shape"   # missing tokens/top_logprobs/offsets
-CAP_BAD_ALIGN = "unsupported_alignment"        # a known greedy continuation verifies at no shift
+# Endpoint classification. Only the two ``verified_text_*`` states are safe to
+# speculate against, and even then only for *surface* (not token-id) identity;
+# everything else must fall back to plain generation. Text mode is therefore
+# conditional and experimental: use a token-ID backend (``spec.backend``) for
+# unconditional equivalence. See ``docs/spec_phase2_results.md``.
+CAP_CLASSIC = "verified_text_classic_alignment"   # index i predicts token i (shift 0)
+CAP_SHIFTED = "verified_text_shifted_alignment"   # index i predicts token i+1 (shift 1)
+CAP_ECHO_IGNORED = "echo_ignored"                 # prompt not echoed back at all
+CAP_ECHO_INCOMPLETE = "echo_incomplete"           # scored input not echoed in full
+CAP_GENERATED_ONLY = "generated_logprobs_only"    # logprobs cover generated tokens only
+CAP_BAD_SHAPE = "unsupported_response_shape"      # missing tokens/top_logprobs/offsets
+CAP_MALFORMED_ARRAYS = "malformed_logprob_arrays"  # length mismatch / non-finite logprobs
+CAP_PARTIAL_COVERAGE = "partial_continuation_coverage"  # continuation not fully tiled
+CAP_INVALID_OFFSETS = "invalid_offsets"           # non-monotonic / overlap / gap / no map
+CAP_UNSUPPORTED_OFFSET_UNITS = "unsupported_offset_units"  # byte offsets, not code points
+CAP_AMBIGUOUS_ALIGN = "ambiguous_alignment"       # both shifts verify — cannot disambiguate
+CAP_BAD_ALIGN = "unsupported_alignment"           # known greedy continuation verifies at no shift
+CAP_BONUS_UNAVAILABLE = "bonus_unavailable"       # no present, unambiguous bonus prediction
+CAP_UNSUPPORTED_TOKEN_IDENTITY = "unsupported_token_identity"  # byte-fallback surfaces
+CAP_NONDETERMINISTIC_POLICY = "nondeterministic_policy"  # response advertises non-greedy decode
 CAP_ERROR = "probe_error"
 
 _USABLE = {CAP_CLASSIC, CAP_SHIFTED}
+
+# llama.cpp renders bytes it cannot show as text as ``<0xE2>`` etc. Such a
+# "surface" is a token-identity artifact, not literal text: appending it as a
+# string would corrupt output, and text scoring cannot tell it from real text.
+_BYTE_FALLBACK_RE = re.compile(r"^<0x[0-9A-Fa-f]{2}>$")
 
 
 @dataclass
@@ -263,38 +282,256 @@ class EndpointCapability:
     echoed: bool = False
     has_prompt_logprobs: bool = False
     offsets_ok: bool = False
+    offset_unit: str | None = None
     continuation_verified: bool = False
     bonus_ok: bool = False
     detail: str = ""
 
     @property
     def usable(self) -> bool:
-        return self.status in _USABLE
+        # Defence in depth: even a mis-constructed capability is unusable unless
+        # every load-bearing invariant holds. offsets_ok / bonus_ok being false
+        # can never yield a usable endpoint.
+        return (
+            self.status in _USABLE
+            and self.offsets_ok
+            and self.bonus_ok
+            and self.continuation_verified
+        )
 
 
-def _continuation_match_rate(choice: dict, prompt_len: int, sent_len: int,
-                             shift: int) -> tuple[int, int]:
-    """How many tokens strictly inside the continuation region verify as greedy?"""
-    toks, _ = _parse_logprobs(choice, shift=shift)
-    good = total = 0
-    for t in toks:
-        if prompt_len <= t.offset and t.offset + len(t.surface) <= sent_len:
-            total += 1
-            good += t.is_greedy
-    return good, total
+def _finite(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(float(x))
+
+
+def _logprobs_finite(token_lps: list, tops: list) -> bool:
+    """Every candidate/token logprob is a finite number (index 0 may be null)."""
+    for i, lp in enumerate(token_lps):
+        if lp is None:
+            if i == 0:
+                continue
+            return False
+        if not _finite(lp):
+            return False
+    for i, top in enumerate(tops):
+        if top is None:
+            if i == 0:
+                continue
+            return False
+        if not isinstance(top, dict) or not top:
+            return False
+        if not all(_finite(v) for v in top.values()):
+            return False
+    return True
+
+
+def _tiles(text_units, surfaces, offsets) -> bool:
+    """Do ``surfaces`` tile a prefix of ``text_units`` contiguously from 0?
+
+    One predicate for monotonicity, non-overlap, no gaps and exact surface
+    mapping: each surface must sit exactly where the previous one ended, and its
+    bytes/chars must match the text there. ``text_units`` and ``surfaces`` are
+    both str (code-point units) or both bytes (byte units).
+    """
+    if not offsets or offsets[0] != 0:
+        return False
+    cursor = 0
+    for surf, off in zip(surfaces, offsets, strict=True):
+        if off != cursor:
+            return False
+        if text_units[off:off + len(surf)] != surf:
+            return False
+        cursor = off + len(surf)
+    return True
+
+
+def _classify_offsets(text: str, tokens: list, offsets: list) -> tuple[bool, str]:
+    """Detect the offset unit and whether the tiling is exact.
+
+    Returns ``(ok, unit)``: ``ok`` is true only for exact code-point tiling.
+    Byte offsets are *detected* (so the caller can reject them explicitly rather
+    than silently mis-index multibyte text) but never accepted.
+    """
+    surfaces = [str(s) for s in tokens]
+    if _tiles(text, surfaces, offsets):
+        return True, "codepoint"
+    tb = text.encode("utf-8")
+    if _tiles(tb, [s.encode("utf-8") for s in surfaces], offsets):
+        return False, "byte"
+    return False, "unknown"
+
+
+def _policy_marker(obj: dict, choice: dict) -> str | None:
+    """Reject a response that advertises a non-greedy / unknown decode policy.
+
+    Faithful greedy engines do not report a sampling policy; one that does, with
+    a value we cannot account for, must not be trusted to be raw-argmax.
+    """
+    for src in (obj, choice):
+        pol = src.get("generation_policy") or src.get("sampling") or src.get("x_generation_policy")
+        if isinstance(pol, dict):
+            temp = pol.get("temperature")
+            if temp is not None and float(temp) != 0.0:
+                return f"response advertises temperature={temp}"
+            for field_name in ("grammar", "logit_bias"):
+                if pol.get(field_name):
+                    return f"response advertises {field_name}"
+            unknown = set(pol) - {"temperature", "top_k", "top_p", "min_p"}
+            if unknown:
+                return f"response advertises unknown generation-policy fields {sorted(unknown)}"
+    return None
+
+
+def classify_scored_choice(choice: dict, prompt: str, sent: str,
+                           obj: dict | None = None) -> EndpointCapability:
+    """Classify a single scored ``choice`` against every text-mode invariant.
+
+    Pure (no network) so it can be unit-tested directly and reused by
+    :func:`probe_endpoint`. ``sent`` is the complete input that was scored
+    (prompt + a known raw-argmax continuation); ``prompt`` is its leading
+    context. Only :data:`CAP_CLASSIC` / :data:`CAP_SHIFTED` are usable, and only
+    when *all* of: complete echo, compatible array lengths, finite candidate
+    logprobs, monotonic non-overlapping code-point offsets that map exactly,
+    complete contiguous continuation coverage, a single 100%-verifying shift, and
+    a present unambiguous bonus — hold at once.
+    """
+    obj = obj or {}
+    prompt_len, sent_len = len(prompt), len(sent)
+    text = choice.get("text") or ""
+    lp = choice.get("logprobs") or {}
+    tokens = lp.get("tokens")
+    offsets = lp.get("text_offset")
+    token_lps = lp.get("token_logprobs")
+    tops = lp.get("top_logprobs")
+
+    marker = _policy_marker(obj, choice)
+    if marker:
+        return EndpointCapability(CAP_NONDETERMINISTIC_POLICY, detail=marker)
+
+    # (1) shape present.
+    if not tokens or tops is None or offsets is None:
+        return EndpointCapability(
+            CAP_BAD_SHAPE, echoed=text.startswith(prompt),
+            detail="response.logprobs missing tokens/top_logprobs/text_offset "
+                   "(e.g. native llama-server returns logprobs.content)")
+
+    # (2) compatible array lengths — tokens, token_logprobs, top_logprobs, offsets.
+    n = len(tokens)
+    if not (len(offsets) == n and len(tops) == n and token_lps is not None and len(token_lps) == n):
+        return EndpointCapability(
+            CAP_MALFORMED_ARRAYS, echoed=text.startswith(prompt),
+            detail=f"logprob arrays have mismatched lengths (tokens={n}, "
+                   f"offsets={len(offsets)}, top={len(tops)}, "
+                   f"token_logprobs={None if token_lps is None else len(token_lps)})")
+
+    # (3) echo gates — complete echo of the whole scored input, not just the prompt.
+    if not text.startswith(prompt):
+        return EndpointCapability(CAP_ECHO_IGNORED, echoed=False,
+                                  detail="echo not applied; response text does not include the prompt")
+    if not any(o < prompt_len for o in offsets):
+        return EndpointCapability(CAP_GENERATED_ONLY, echoed=True, has_prompt_logprobs=False,
+                                  detail="prompt echoed but logprobs cover generated positions only")
+    if not text.startswith(sent):
+        return EndpointCapability(CAP_ECHO_INCOMPLETE, echoed=True, has_prompt_logprobs=True,
+                                  detail="scored input not echoed in full (continuation omitted)")
+
+    # (4) finite, valid candidate log probabilities.
+    if not _logprobs_finite(token_lps, tops):
+        return EndpointCapability(CAP_MALFORMED_ARRAYS, echoed=True, has_prompt_logprobs=True,
+                                  detail="non-finite or malformed token/candidate log probabilities")
+
+    # (5) token identity: byte-fallback surfaces cannot be verified as text.
+    def _is_byte_fallback(s: Any) -> bool:
+        return isinstance(s, str) and bool(_BYTE_FALLBACK_RE.match(s))
+    for i, s in enumerate(tokens):
+        within = prompt_len <= int(offsets[i]) < sent_len
+        if within and _is_byte_fallback(s):
+            return EndpointCapability(CAP_UNSUPPORTED_TOKEN_IDENTITY, echoed=True,
+                                      has_prompt_logprobs=True,
+                                      detail=f"byte-fallback surface {s!r} in continuation; "
+                                             "text mode cannot prove token identity")
+    for top in tops:
+        if isinstance(top, dict) and any(_is_byte_fallback(k) for k in top):
+            return EndpointCapability(CAP_UNSUPPORTED_TOKEN_IDENTITY, echoed=True,
+                                      has_prompt_logprobs=True,
+                                      detail="byte-fallback candidate surface; text mode "
+                                             "cannot prove token identity")
+
+    # (6) offsets: known unit, exact contiguous mapping.
+    ok, unit = _classify_offsets(text, tokens, offsets)
+    if unit == "byte":
+        return EndpointCapability(CAP_UNSUPPORTED_OFFSET_UNITS, echoed=True, has_prompt_logprobs=True,
+                                  offset_unit="byte",
+                                  detail="offsets are UTF-8 byte positions, not code points; "
+                                         "loop math assumes code points")
+    if not ok:
+        return EndpointCapability(CAP_INVALID_OFFSETS, echoed=True, has_prompt_logprobs=True,
+                                  detail="offsets are non-monotonic, overlapping, gapped, or do "
+                                         "not map to the returned surfaces")
+
+    # (7) complete contiguous coverage of the continuation [prompt_len, sent_len].
+    cutpoints = {0} | {int(offsets[i]) + len(str(tokens[i])) for i in range(n)}
+    cont_idx = [i for i in range(n)
+                if prompt_len <= int(offsets[i]) and int(offsets[i]) + len(str(tokens[i])) <= sent_len]
+    if prompt_len not in cutpoints or sent_len not in cutpoints or not cont_idx:
+        return EndpointCapability(CAP_PARTIAL_COVERAGE, echoed=True, has_prompt_logprobs=True,
+                                  offsets_ok=True, offset_unit="codepoint",
+                                  detail="continuation is not tiled by whole tokens "
+                                         "(a token straddles a seam or coverage is incomplete)")
+
+    # (8) exactly one alignment shift verifies the whole known continuation.
+    verifying = []
+    for shift in (0, 1):
+        toks_s, _ = _parse_logprobs(choice, shift=shift)
+        if cont_idx and all(toks_s[i].is_greedy for i in cont_idx):
+            verifying.append(shift)
+    if not verifying:
+        return EndpointCapability(CAP_BAD_ALIGN, echoed=True, has_prompt_logprobs=True,
+                                  offsets_ok=True, offset_unit="codepoint",
+                                  detail="known greedy continuation verifies at no shift (0 or 1)")
+    if len(verifying) > 1:
+        return EndpointCapability(CAP_AMBIGUOUS_ALIGN, echoed=True, has_prompt_logprobs=True,
+                                  offsets_ok=True, offset_unit="codepoint",
+                                  detail="continuation verifies at BOTH shift 0 and 1; "
+                                         "alignment is ambiguous and cannot be trusted")
+    shift = verifying[0]
+
+    # (9) a present, unambiguous bonus prediction.
+    toks_f, preds_f = _parse_logprobs(choice, shift=shift)
+    sr = ScoreResult(tokens=toks_f, shift=shift, predictions=preds_f)
+    bonus = sr.greedy_after(sent_len)
+    if bonus.surface is None or bonus.ambiguous:
+        return EndpointCapability(CAP_BONUS_UNAVAILABLE, echoed=True, has_prompt_logprobs=True,
+                                  offsets_ok=True, offset_unit="codepoint", continuation_verified=True,
+                                  detail="no present, unambiguous bonus prediction after the input")
+
+    status = CAP_CLASSIC if shift == 0 else CAP_SHIFTED
+    return EndpointCapability(
+        status=status, shift=shift, echoed=True, has_prompt_logprobs=True,
+        offsets_ok=True, offset_unit="codepoint", continuation_verified=True, bonus_ok=True,
+        detail=f"known greedy continuation verifies 100% at the single shift {shift}; "
+               "surface identity only (not token-id)")
 
 
 def probe_endpoint(upstream: str, api_key: str, model: str,
-                   probe_prompt: str = "The quick brown fox jumps over the lazy dog. 1 2 3 4 5 6 7 8",
+                   probe_prompt: str = "The quick brown café jumps über the lazy dog. 1 2 3 4 5 6 7 8",
                    timeout: int = 600) -> EndpointCapability:
     """Classify an endpoint by *behaviour*, so we never speculate blindly.
 
     Generates a known raw-argmax continuation, scores ``prompt + continuation``,
-    and requires the endpoint to prove it (a) echoes the prompt, (b) returns
-    prompt-position candidates, (c) has a measurable positional shift under
-    which that known greedy continuation verifies end-to-end, and (d) exposes
-    the bonus position. Native ``llama-server`` fails at (a)/(b) and is reported
-    unusable rather than silently mis-verified.
+    and hands the result to :func:`classify_scored_choice`, which enforces every
+    text-mode invariant. Only an endpoint that echoes the complete scored input,
+    returns well-formed finite logprobs with monotonic code-point offsets that
+    tile the continuation, verifies that known continuation 100% at exactly one
+    shift, and exposes an unambiguous bonus is reported usable — and even then
+    only for *surface* identity. Native ``llama-server`` fails the echo gate and
+    is reported unusable rather than silently mis-verified.
+
+    The probe prompt deliberately contains multibyte characters (``café``,
+    ``über``): on pure-ASCII text byte and code-point offsets coincide, so an
+    endpoint reporting UTF-8 *byte* offsets would pass unnoticed and then
+    mis-index real multibyte generation. The multibyte probe forces the offset
+    unit to reveal itself.
     """
     cont = generate_burst(upstream, api_key, model, probe_prompt, 16, timeout=timeout)
     if cont.error or not cont.text:
@@ -306,55 +543,7 @@ def probe_endpoint(upstream: str, api_key: str, model: str,
     if err:
         return EndpointCapability(CAP_ERROR, detail=err)
     choice = (obj.get("choices") or [{}])[0]
-    text = choice.get("text") or ""
-    lp = choice.get("logprobs") or {}
-    tokens = lp.get("tokens") or []
-    have_fields = bool(tokens) and lp.get("top_logprobs") and lp.get("text_offset") is not None
-    echoed = text.startswith(probe_prompt)
-    if not have_fields:
-        return EndpointCapability(CAP_BAD_SHAPE, echoed=echoed,
-                                  detail="response.logprobs missing tokens/top_logprobs/text_offset "
-                                         "(e.g. native llama-server returns logprobs.content)")
-    # Echo is the gate: if the returned text does not begin with the prompt, the
-    # engine did not score prompt positions and cannot verify drafts.
-    if not echoed:
-        return EndpointCapability(CAP_ECHO_IGNORED, echoed=False, has_prompt_logprobs=False,
-                                  detail="echo not applied; response text does not include the prompt")
-    offs = lp.get("text_offset") or []
-    if not any(o < len(probe_prompt) for o in offs):
-        return EndpointCapability(CAP_GENERATED_ONLY, echoed=echoed, has_prompt_logprobs=False,
-                                  detail="prompt echoed but logprobs cover generated positions only")
-    # offsets sane: each token's surface appears at its reported offset.
-    offsets_ok = all(
-        0 <= o <= len(text) and text[o:o + len(str(s))] == str(s)
-        for s, o in zip(tokens, offs, strict=False)
-    )
-    # Which shift makes the KNOWN greedy continuation verify?
-    best = None
-    for shift in (0, 1):
-        good, total = _continuation_match_rate(choice, len(probe_prompt), len(sent), shift)
-        if total and (best is None or good / total > best[1]):
-            best = (shift, good / total, good, total)
-    if best is None or best[3] == 0:
-        return EndpointCapability(CAP_BAD_ALIGN, echoed=echoed, has_prompt_logprobs=True,
-                                  offsets_ok=offsets_ok, detail="no continuation tokens to verify")
-    shift, rate, good, total = best
-    if rate < 0.95:
-        return EndpointCapability(CAP_BAD_ALIGN, echoed=echoed, has_prompt_logprobs=True,
-                                  offsets_ok=offsets_ok,
-                                  detail=f"known greedy continuation verifies at only "
-                                         f"{good}/{total} (best shift {shift})")
-    # Bonus position resolvable?
-    _toks, _preds = _parse_logprobs(choice, shift=shift)
-    sr = ScoreResult(tokens=_toks, shift=shift, predictions=_preds)
-    bonus_ok = sr.greedy_after(len(sent)).surface is not None
-    status = CAP_CLASSIC if shift == 0 else CAP_SHIFTED
-    return EndpointCapability(
-        status=status, shift=shift, echoed=echoed, has_prompt_logprobs=True,
-        offsets_ok=offsets_ok, continuation_verified=True, bonus_ok=bonus_ok,
-        detail=f"greedy continuation verified {good}/{total} at shift {shift}"
-        + ("" if offsets_ok else "; WARNING offsets did not map to surfaces"),
-    )
+    return classify_scored_choice(choice, probe_prompt, sent, obj=obj)
 
 
 def _post(upstream: str, api_key: str, body: dict, timeout: int) -> tuple[dict, str | None]:

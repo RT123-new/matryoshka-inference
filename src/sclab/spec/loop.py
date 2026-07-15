@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from sclab.spec.memory import LookupMemory
-from sclab.spec.verify import generate_burst, score_completion
+from sclab.spec.verify import EndpointCapability, generate_burst, score_completion
 
 
 @dataclass
@@ -50,6 +50,9 @@ class SpecStats:
     tokens_burst: int = 0
     seam_fallbacks: int = 0
     verify_rounds_zero_accept: int = 0   # verify rounds that accepted 0 draft tokens
+    spec_available: bool = True          # False when the capability was unusable
+    degraded_to_plain: bool = False      # a mid-run failure forced plain generation
+    usage_fallback: bool = False         # missing token counts forced one plain finish
     finish_reason: str | None = None
     error: str | None = None
     recent_accepts: list[int] = field(default_factory=list)
@@ -104,6 +107,9 @@ class SpecStats:
             "tokens_burst": self.tokens_burst,
             "seam_fallbacks": self.seam_fallbacks,
             "verify_rounds_zero_accept": self.verify_rounds_zero_accept,
+            "spec_available": self.spec_available,
+            "degraded_to_plain": self.degraded_to_plain,
+            "usage_fallback": self.usage_fallback,
             "draft_tokens_accepted_per_verify": round(self.draft_tokens_accepted_per_verify, 3),
             "tokens_emitted_per_verify": round(self.tokens_emitted_per_verify, 3),
             "corrections_per_verify": round(self.corrections_per_verify, 3),
@@ -122,39 +128,61 @@ def spec_generate(
     prompt: str,
     max_tokens: int = 256,
     memory: LookupMemory | None = None,
+    capability: EndpointCapability | None = None,
     draft_chars: int = 64,
     min_draft_chars: int = 8,
     burst_tokens: int = 16,
     backoff_rounds: int = 4,
-    shift: int = 0,
     timeout: int = 600,
 ) -> tuple[str, SpecStats]:
     """Generate greedily via the engine's public API, faster where possible.
 
     Returns ``(generated_text, stats)``. The text is byte-identical to what a
-    single plain greedy request (with ``verify._GREEDY_POLICY``) would produce;
-    pass the same ``memory`` across calls to let acceptance compound. ``shift``
-    is the endpoint's measured positional shift (see ``verify.probe_endpoint``);
-    it must be correct or verification will corrupt the output.
+    single plain greedy request (with ``verify._GREEDY_POLICY``) would produce.
+
+    Speculation runs **only** when ``capability`` is a *usable* endpoint
+    capability (see ``verify.probe_endpoint``); without one, the request is
+    plain generation. This is the safety gate: there is no public default that
+    assumes an alignment. Even usable, text mode proves *surface* identity only,
+    not token-id identity — use ``token_verify.spec_generate_tokens`` with a
+    token-ID backend for unconditional equivalence.
+
+    Token budgeting never guesses: burst tokens are counted from the engine's
+    ``completion_tokens`` usage. If that is absent, incremental speculation is
+    disabled and the remaining budget is finished in one plain call, so a server
+    with no usage data can never drive output past ``max_tokens``.
     """
     memory = memory if memory is not None else LookupMemory()
     stats = SpecStats()
+
+    # No usable capability → plain generation, full stop. The engine's own
+    # ``max_tokens`` bounds the output; nothing here can silently mis-verify.
+    if capability is None or not capability.usable:
+        stats.spec_available = False
+        return _plain_only(upstream, api_key, model, prompt, max_tokens, stats, timeout)
+    shift = capability.shift or 0
+
     memory.observe(prompt)
     ctx = prompt
     out = ""
     forced_bursts = 0   # anti-thrash: after bad verify rounds, burst for a while
 
     while stats.tokens_total < max_tokens:
+        remaining = max_tokens - stats.tokens_total
         draft = None
         if forced_bursts == 0:
             draft = memory.propose(ctx, max_chars=draft_chars, min_chars=min_draft_chars)
 
         if draft is None:
-            piece_budget = min(burst_tokens, max_tokens - stats.tokens_total)
+            piece_budget = min(burst_tokens, remaining)
             r = generate_burst(upstream, api_key, model, ctx, piece_budget, timeout=timeout)
             stats.requests += 1
             if r.error:
-                stats.error = r.error
+                # Fail-safe: try to finish the rest plainly rather than truncate.
+                tail, finish = _finish_plain(upstream, api_key, model, ctx, remaining,
+                                             stats, timeout, first_error=r.error)
+                out += tail
+                stats.finish_reason = finish or stats.finish_reason
                 break
             stats.burst_rounds += 1
             forced_bursts = max(0, forced_bursts - 1)
@@ -162,8 +190,19 @@ def spec_generate(
             if not piece:
                 stats.finish_reason = r.finish_reason or "stop"
                 break
-            n = int((r.usage or {}).get("completion_tokens") or 0) or max(1, len(piece.split()))
-            n = min(n, piece_budget)
+            comp = (r.usage or {}).get("completion_tokens")
+            if comp is None:
+                # No trustworthy token count: neither over- nor under-counting is
+                # safe (one overruns the budget, the other truncates output). Drop
+                # this piece and finish the remaining budget in a single plain call
+                # whose length the engine bounds exactly.
+                stats.usage_fallback = True
+                tail, finish = _finish_plain(upstream, api_key, model, ctx, remaining,
+                                             stats, timeout)
+                out += tail
+                stats.finish_reason = finish or stats.finish_reason
+                break
+            n = min(int(comp), piece_budget)
             stats.tokens_burst += n
             stats.tokens_total += n
             ctx += piece
@@ -179,7 +218,13 @@ def spec_generate(
         sr = score_completion(upstream, api_key, model, sent, shift=shift, timeout=timeout)
         stats.requests += 1
         if sr.error:
-            stats.error = sr.error
+            # Fail-safe: a verification error must not return a truncated
+            # "success". Finish the remaining budget plainly from the last
+            # confirmed token; the output still equals plain generation.
+            tail, finish = _finish_plain(upstream, api_key, model, ctx, remaining,
+                                         stats, timeout, first_error=sr.error)
+            out += tail
+            stats.finish_reason = finish or stats.finish_reason
             break
         stats.verify_rounds += 1
         draft_toks = sr.draft_tokens(len(ctx), len(sent))
@@ -255,3 +300,52 @@ def spec_generate(
     if stats.finish_reason is None and stats.tokens_total >= max_tokens:
         stats.finish_reason = "length"
     return out, stats
+
+
+def _plain_only(upstream: str, api_key: str, model: str, prompt: str, max_tokens: int,
+                stats: SpecStats, timeout: int) -> tuple[str, SpecStats]:
+    """One plain generation call — what a non-accelerated client would send.
+
+    The engine's ``max_tokens`` bounds the output length, so this is lossless and
+    budget-safe without any token counting on our side.
+    """
+    r = generate_burst(upstream, api_key, model, prompt, max_tokens, timeout=timeout)
+    stats.requests += 1
+    if r.error:
+        stats.error = r.error
+        return "", stats
+    stats.burst_rounds += 1
+    comp = (r.usage or {}).get("completion_tokens")
+    stats.tokens_burst = int(comp) if comp is not None else 0
+    stats.tokens_total = min(int(comp), max_tokens) if comp is not None else (max_tokens if r.text else 0)
+    stats.finish_reason = r.finish_reason or ("length" if r.text else "stop")
+    return r.text, stats
+
+
+def _finish_plain(upstream: str, api_key: str, model: str, ctx: str, remaining: int,
+                  stats: SpecStats, timeout: int, first_error: str | None = None
+                  ) -> tuple[str, str | None]:
+    """Finish the remaining budget in a single plain call, from the last token.
+
+    Used both when a burst/verify round errors (fail-safe: never truncate a
+    "success") and when usage data is missing (budget cannot be tracked). Because
+    everything emitted so far is exact greedy output, plain-continuing from ``ctx``
+    yields the same bytes as a single plain ``max_tokens`` call would. Preserves
+    the original error in telemetry and marks the run degraded when one occurred.
+    """
+    if first_error is not None:
+        stats.error = stats.error or first_error
+        stats.degraded_to_plain = True
+    if remaining <= 0:
+        return "", stats.finish_reason
+    r = generate_burst(upstream, api_key, model, ctx, remaining, timeout=timeout)
+    stats.requests += 1
+    if r.error:
+        stats.error = stats.error or r.error
+        return "", stats.finish_reason
+    stats.burst_rounds += 1
+    comp = (r.usage or {}).get("completion_tokens")
+    n = min(int(comp), remaining) if comp is not None else (remaining if r.text else 0)
+    stats.tokens_burst += n
+    stats.tokens_total += n
+    return r.text, (r.finish_reason or ("length" if r.text else "stop"))
