@@ -205,10 +205,13 @@ The prototype handles this **safely, never silently**:
   tokens precisely to stay canonical, so seams are rare in practice; the sim
   models this so the losslessness guarantee is clean and honest.
 
-**The guarantee the prototype proves:** every emitted token is the engine's own
-greedy choice given the exact preceding text. For canonical tokenizers that is
-identical to a monolithic call (proven in CI). The path to *unconditional*
-monolithic-call equivalence is §7 Phase 2: **token-ID-level speculation.**
+**The guarantee the text prototype proves:** every emitted token is the engine's
+own greedy choice given the exact preceding *text* — *surface* identity for
+canonical tokenizers, and only on an endpoint that passes the strict probe. The
+path to *unconditional* monolithic-call equivalence is **token-ID-level
+speculation**, now implemented against deterministic fixtures (§7 Phase 2 /
+[`docs/spec_phase2_results.md`](docs/spec_phase2_results.md)); it keeps state as
+token ids and is id- and byte-identical to a monolithic call.
 
 ---
 
@@ -239,12 +242,29 @@ Outcome, honestly:
   guarantee ~1× on overhead-dominated engines. A wall-clock win needs a
   bandwidth-bound decoder (large model / GPU) — the recommended next experiment.
 
-### Phase 2 — token-ID mode for unconditional equivalence (1–2 weeks)
-For engines that accept token-ID prompts and return per-token logprobs
-(llama.cpp, vLLM, TGI), draft and verify in **token IDs**, eliminating
-re-tokenization entirely → byte-perfect vs a monolithic call with zero seam
-fallbacks. Keep text mode as the universal fallback. Auto-detect capability via
-a one-time probe at startup.
+### Phase 2 — token-ID mode + a hardened text probe — **DONE (against fixtures); see [`docs/spec_phase2_results.md`](docs/spec_phase2_results.md)**
+Outcome, honestly:
+- **Token-ID verification is implemented and is id- and byte-identical to plain
+  generation** across every deterministic test — including the cases text mode
+  cannot handle (distinct ids sharing a surface; output that re-tokenizes
+  differently). A `VerificationBackend` abstraction (`spec/backend.py`,
+  `spec/token_verify.py`) keeps the authoritative context as **token ids** across
+  rounds and never re-tokenizes generated text to rebuild state. The first
+  backend is an **in-process `llama-cpp-python`** adapter (`spec/llamacpp_backend.py`,
+  opt-in). It is **not** universal — one backend, one engine's in-process API.
+- **The text-surface probe is now strict.** Byte offsets, incomplete echo,
+  partial coverage, ambiguous alignment, missing/ambiguous bonus, malformed or
+  non-finite logprobs, byte-fallback surfaces and non-greedy policies are all
+  **rejected**; `usable` requires `offsets_ok` **and** `bonus_ok`; `spec_generate`
+  cannot enter the verify lane without a usable capability (no default shift 0);
+  the whitespace token-budget estimate is gone; and verify/burst failures degrade
+  to plain generation instead of truncating. Text mode is now labelled
+  **conditional and experimental** and proves *surface* identity only.
+- **Not proven here:** token-ID equivalence on a **real engine** and on a
+  **trained** model — `llama-cpp-python` is not installed and no GGUF was
+  reachable, so the real-engine tests (`tests/test_spec_realengine.py`, gated on
+  `SCLAB_SPEC_TEST_GGUF` / `SCLAB_SPEC_TEST_MODEL_TYPE`) **skip**. No speedup is
+  claimed; the benchmark now gates any timing on the correctness result.
 
 ### Phase 3 — fold into the proxy + dashboard (1 week)
 Add `--accelerate spec` to `sclab serve --backend proxy`. The proxy already

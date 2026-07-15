@@ -1,0 +1,30 @@
+{
+  "text_codepoint": {
+    "status": "verified_text_classic_alignment",
+    "usable": true,
+    "shift": 0,
+    "offset_unit": "codepoint",
+    "detail": "known greedy continuation verifies 100% at the single shift 0; surface identity only (not token-id)"
+  },
+  "text_byte_offsets": {
+    "status": "unsupported_offset_units",
+    "usable": false,
+    "detail": "offsets are UTF-8 byte positions, not code points; loop math assumes code points"
+  },
+  "token_id": {
+    "mode": "verified_token_id",
+    "usable": true,
+    "deterministic": true,
+    "policy": {
+      "temperature": 0.0,
+      "top_k": 1,
+      "top_p": 1.0,
+      "min_p": 0.0,
+      "typical_p": 1.0,
+      "repeat_penalty": 1.0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "mirostat": 0
+    }
+  }
+}

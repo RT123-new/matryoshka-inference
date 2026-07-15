@@ -2,7 +2,40 @@
 
 ## Unreleased
 
-### Added — universal API-level verified speculation (experimental)
+### Changed — token-ID verified speculation + a hardened text probe (spec Phase 2)
+
+- New `VerificationBackend` abstraction (`sclab.spec.backend`,
+  `sclab.spec.token_verify`): verifies drafts on **token ids** against a
+  backend's raw argmax and keeps the authoritative context as ids across rounds,
+  so output is **id- and byte-identical** to a single plain call — the
+  unconditional equivalence text-surface mode cannot give. First backend: an
+  opt-in in-process `llama-cpp-python` adapter (`sclab.spec.llamacpp_backend`).
+  Proven to the byte against deterministic fixtures; **no trained model was
+  reachable**, so trained-model equivalence is set up (opt-in) but not run.
+- **Hardened the text-surface probe.** An endpoint is usable only when every
+  invariant holds: complete echo, compatible/finite logprob arrays, monotonic
+  non-overlapping **code-point** offsets tiling the continuation, a single
+  100%-verifying alignment shift, and an unambiguous bonus. Byte offsets,
+  ambiguous alignment, byte-fallback surfaces and non-greedy policies are
+  rejected; `usable` now requires `offsets_ok` **and** `bonus_ok`.
+  `spec_generate(..., capability=None)` runs plain generation — no default
+  assumes an alignment. The whitespace token-budget estimate is removed, and
+  verify/burst failures degrade to plain generation instead of truncating.
+- **Benchmark honesty:** speed is gated on the byte-identity correctness result;
+  timing validates every call, alternates order, separates cold/warm/cached
+  regimes, reports median with min/max and request counts, and saves
+  machine-readable results (`results/spec_phase2/`). Text-surface mode is now
+  documented as **conditional and experimental**; see
+  [`docs/spec_phase2_results.md`](docs/spec_phase2_results.md).
+
+### Added — API-level verified speculation, text-surface lane (experimental)
+
+_Phase 1 correction: what Phase 0 called "universal, byte-identical on any
+OpenAI-compatible engine" was narrowed — see
+[`docs/spec_phase1_results.md`](docs/spec_phase1_results.md). It works only on an
+endpoint that passes a behavioural probe (`llama-cpp-python`, which needed a +1
+alignment fix; **not** native `llama-server`), proves surface identity only, and
+showed no speedup on the CPU test rig._
 
 - New `sclab.spec` package: lossless speculative decoding through *any*
   OpenAI-compatible `/v1/completions` engine, with **no draft model, no engine

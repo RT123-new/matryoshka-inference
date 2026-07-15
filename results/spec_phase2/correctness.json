@@ -1,0 +1,38 @@
+{
+  "text_surface_byte_identical": true,
+  "token_id_rows": [
+    {
+      "max_tokens": 1,
+      "token_id_equal": true,
+      "byte_equal": true,
+      "verify_rounds": 1,
+      "draft_ids_accepted": 1,
+      "draft_ids_accepted_per_verify": 1.0
+    },
+    {
+      "max_tokens": 16,
+      "token_id_equal": true,
+      "byte_equal": true,
+      "verify_rounds": 1,
+      "draft_ids_accepted": 16,
+      "draft_ids_accepted_per_verify": 16.0
+    },
+    {
+      "max_tokens": 64,
+      "token_id_equal": true,
+      "byte_equal": true,
+      "verify_rounds": 1,
+      "draft_ids_accepted": 64,
+      "draft_ids_accepted_per_verify": 64.0
+    },
+    {
+      "max_tokens": 200,
+      "token_id_equal": true,
+      "byte_equal": true,
+      "verify_rounds": 13,
+      "draft_ids_accepted": 188,
+      "draft_ids_accepted_per_verify": 14.462
+    }
+  ],
+  "token_id_all_equal": true
+}

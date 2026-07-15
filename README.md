@@ -47,18 +47,35 @@ long input ──[semantic compressor]──► short prompt      (attacks PREFI
    without even paying the draft pass.
 
 > **Experimental — the API-level path.** Levers 2–4 are lossless but MLX-only.
-> `sclab spec-bench` prototypes the same propose→verify guarantee through an
-> OpenAI-compatible engine's public API (`echo`+prompt-`logprobs` scoring), with
-> no draft model and no special checkpoint. Phase 1 tested it on real engines
-> (see [`docs/spec_phase1_results.md`](docs/spec_phase1_results.md)): the loop is
-> **byte-identical to plain raw-argmax greedy generation on a real engine** once
-> the endpoint's logprob *alignment* is measured — but the primitive is **not
-> universal**. It works on `llama-cpp-python` (which needed a +1 alignment fix);
-> the current native `llama.cpp` `llama-server` does **not** expose it at all.
-> `spec-bench` now **probes** an endpoint and refuses to speculate unless it
-> qualifies. A wall-clock win needs a memory-bandwidth-bound decoder (a large
-> model / GPU), which the Phase 1 CPU test rig did not have. Try `sclab
-> spec-bench --sim --cost-probe` (no model needed); roadmap in [`HANDOFF.md`](HANDOFF.md).
+> `sclab spec-bench` prototypes the same propose→verify guarantee against an
+> external engine, in two lanes with *different* guarantees — do not conflate them:
+>
+> * **Text-surface mode (conditional, experimental).** Verifies drafts through an
+>   OpenAI-compatible engine's public API (`echo`+prompt-`logprobs` scoring). It
+>   proves only **surface** identity for raw-argmax greedy decoding, and only on
+>   an endpoint that passes a **strict** capability probe (complete echo, finite
+>   logprobs, monotonic **code-point** offsets tiling the continuation, a single
+>   100%-verifying alignment shift, an unambiguous bonus). It is **not universal**:
+>   it works on `llama-cpp-python` (which needed a +1 alignment fix); native
+>   `llama.cpp` `llama-server` does **not** expose the primitive, byte-offset and
+>   ambiguous endpoints are **rejected**, and distinct token ids sharing a surface
+>   are beyond what it can prove. Without a usable capability, `spec-bench` runs
+>   plain generation — there is no default that assumes an alignment.
+> * **Token-ID mode (Phase 2).** Verifies drafts on **token ids** against a
+>   backend's raw argmax, keeping the authoritative context as ids across rounds,
+>   so output is **id- and byte-identical** to a single plain call — the
+>   unconditional equivalence text mode cannot give. The first backend is an
+>   in-process `llama-cpp-python` adapter (opt-in). Demonstrated to the byte
+>   against deterministic fixtures; **no trained model was reachable in this
+>   environment**, so trained-model equivalence is set up (opt-in tests) but not
+>   yet run.
+>
+> **No speed claim.** A wall-clock win needs a memory-bandwidth-bound decoder (a
+> large model / GPU), which the test rig did not have; on a tiny CPU model
+> speculation is *slower*, and `spec-bench` reports timing only after the
+> correctness gate passes. See [`docs/spec_phase2_results.md`](docs/spec_phase2_results.md)
+> and [`docs/spec_phase1_results.md`](docs/spec_phase1_results.md); roadmap in
+> [`HANDOFF.md`](HANDOFF.md). Try `sclab spec-bench --sim` (no model needed).
 
 ## Install
 

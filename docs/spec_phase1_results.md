@@ -1,5 +1,14 @@
 # Spec Phase 1 Results — API-Level Verified Speculation on Real Engines
 
+> **Phase 2 update.** The surface-vs-id gap and the seam-fallback path this
+> document flags are addressed by **token-ID mode** — see
+> [`docs/spec_phase2_results.md`](spec_phase2_results.md). Phase 2 also hardened
+> the text-surface probe (byte offsets, incomplete echo, partial coverage,
+> ambiguous alignment and missing bonus are now rejected) and made
+> `spec_generate` refuse to speculate without a usable capability. Text-surface
+> mode as described below is **conditional and experimental**, proving *surface*
+> identity only; token-ID mode is the lane for unconditional equivalence.
+
 This records Phase 1 from `HANDOFF.md`: take the Phase 0 prototype of
 *API-level verified speculative decoding* — which was proven lossless only
 against a deterministic **simulated** engine — and test it against **real local

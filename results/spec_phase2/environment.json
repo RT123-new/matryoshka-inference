@@ -1,0 +1,10 @@
+{
+  "note": "SYNTHETIC ONLY \u2014 deterministic sim engine + fake token backend. No real or trained model was loaded (none reachable in this environment).",
+  "python": "3.11.15",
+  "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+  "git_commit": "79d5ad209956d41414b2861c91cc012db7c44bca",
+  "text_mode_engine": "sclab.spec.sim.SimEngine (LagLM, synthetic)",
+  "token_mode_backend": "scripts fake token backend (deterministic, synthetic)",
+  "real_engine_tested": false,
+  "trained_model_tested": false
+}

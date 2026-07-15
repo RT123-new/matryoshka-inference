@@ -23,6 +23,7 @@ from sclab.spec.verify import (
     CAP_CLASSIC,
     CAP_ECHO_IGNORED,
     CAP_SHIFTED,
+    EndpointCapability,
     generate_burst,
     probe_endpoint,
 )
@@ -59,14 +60,21 @@ def test_probe_detects_alignment(sim, shift):
 @pytest.mark.parametrize("shift", [0, 1])
 def test_lossless_only_at_correct_shift(sim, shift):
     base = sim(shift=shift)
+    cap = probe_endpoint(base, "", "sim")
+    assert cap.usable and cap.shift == shift
     expected = generate_burst(base, "", "sim", PROMPT, 80).text
     got, stats = spec_generate(base, "", "sim", PROMPT, max_tokens=80,
-                               shift=shift, draft_chars=96, burst_tokens=8)
+                               capability=cap, draft_chars=96, burst_tokens=8)
     assert got == expected
     assert stats.tokens_accepted > 0          # real draft tokens, not just corrections
-    # The wrong shift must diverge — this is the guard that pins the whole fix.
+    # A capability carrying the WRONG shift must diverge — the guard that pins the
+    # whole fix, and exactly why the shift is *measured*, never assumed.
+    wrong_cap = EndpointCapability(
+        status=CAP_CLASSIC if shift == 1 else CAP_SHIFTED, shift=1 - shift, echoed=True,
+        has_prompt_logprobs=True, offsets_ok=True, offset_unit="codepoint",
+        continuation_verified=True, bonus_ok=True)
     wrong, _ = spec_generate(base, "", "sim", PROMPT, max_tokens=80,
-                             shift=1 - shift, draft_chars=96, burst_tokens=8)
+                             capability=wrong_cap, draft_chars=96, burst_tokens=8)
     assert wrong != expected
 
 
@@ -81,11 +89,12 @@ def test_run_bench_probes_and_reports_capability(sim):
 
 def test_telemetry_separates_accepted_drafts_from_corrections(sim):
     base = sim(shift=0)
+    cap = probe_endpoint(base, "", "sim")
     mem = LookupMemory()
     primer = generate_burst(base, "", "sim", PROMPT, 120).text
     mem.observe(PROMPT + primer)
     _, stats = spec_generate(base, "", "sim", PROMPT, max_tokens=100, memory=mem,
-                             shift=0, draft_chars=128, burst_tokens=8)
+                             capability=cap, draft_chars=128, burst_tokens=8)
     s = stats.summary()
     # accepted-per-verify counts *draft* tokens only, and equals the raw ratio.
     assert stats.tokens_accepted > 0

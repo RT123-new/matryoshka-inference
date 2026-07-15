@@ -1,0 +1,67 @@
+{
+  "capability": "verified_text_classic_alignment",
+  "shift": 0,
+  "max_tokens": 80,
+  "samples": 5,
+  "regimes": {
+    "cold_prefix": {
+      "baseline_seconds": {
+        "n": 5,
+        "median": 0.00164,
+        "min": 0.00148,
+        "max": 0.00182,
+        "stdev": 0.00011
+      },
+      "spec_seconds": {
+        "n": 5,
+        "median": 0.01389,
+        "min": 0.01356,
+        "max": 0.01416,
+        "stdev": 0.00019
+      },
+      "spec_http_requests_median": 7,
+      "all_outputs_identical": true,
+      "speedup_median": 0.118
+    },
+    "warm_prefix": {
+      "baseline_seconds": {
+        "n": 5,
+        "median": 0.00163,
+        "min": 0.00149,
+        "max": 0.00184,
+        "stdev": 0.00011
+      },
+      "spec_seconds": {
+        "n": 5,
+        "median": 0.01348,
+        "min": 0.01322,
+        "max": 0.01485,
+        "stdev": 0.00059
+      },
+      "spec_http_requests_median": 7,
+      "all_outputs_identical": true,
+      "speedup_median": 0.121
+    },
+    "fully_cached": {
+      "baseline_seconds": {
+        "n": 5,
+        "median": 0.00189,
+        "min": 0.00152,
+        "max": 0.00196,
+        "stdev": 0.00017
+      },
+      "spec_seconds": {
+        "n": 5,
+        "median": 0.01745,
+        "min": 0.01388,
+        "max": 0.01811,
+        "stdev": 0.00192
+      },
+      "spec_http_requests_median": 7,
+      "all_outputs_identical": true,
+      "speedup_median": 0.108
+    }
+  },
+  "prefix_cache_observed": false,
+  "note": "wall-clock is host-dependent; request count is the portable cost signal. Regimes approximate cache state via prompt construction (the engine cache is not resettable via the API)."
+}
