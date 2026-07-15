@@ -46,12 +46,19 @@ long input ──[semantic compressor]──► short prompt      (attacks PREFI
 4. A **copy proposer** (CopySpec-style) serves repeated spans (JSON, templates)
    without even paying the draft pass.
 
-> **Experimental — the universal path.** Levers 2–4 are lossless but MLX-only.
-> `sclab spec-bench` prototypes the same propose→verify guarantee through *any*
-> OpenAI-compatible engine's public API (`echo`+`logprobs` scoring), with no
-> draft model and no special checkpoint — so lossless speculation can become
-> model- and runtime-agnostic. Try `sclab spec-bench --sim --cost-probe` (no
-> model needed); the design and roadmap are in [`HANDOFF.md`](HANDOFF.md).
+> **Experimental — the API-level path.** Levers 2–4 are lossless but MLX-only.
+> `sclab spec-bench` prototypes the same propose→verify guarantee through an
+> OpenAI-compatible engine's public API (`echo`+prompt-`logprobs` scoring), with
+> no draft model and no special checkpoint. Phase 1 tested it on real engines
+> (see [`docs/spec_phase1_results.md`](docs/spec_phase1_results.md)): the loop is
+> **byte-identical to plain raw-argmax greedy generation on a real engine** once
+> the endpoint's logprob *alignment* is measured — but the primitive is **not
+> universal**. It works on `llama-cpp-python` (which needed a +1 alignment fix);
+> the current native `llama.cpp` `llama-server` does **not** expose it at all.
+> `spec-bench` now **probes** an endpoint and refuses to speculate unless it
+> qualifies. A wall-clock win needs a memory-bandwidth-bound decoder (a large
+> model / GPU), which the Phase 1 CPU test rig did not have. Try `sclab
+> spec-bench --sim --cost-probe` (no model needed); roadmap in [`HANDOFF.md`](HANDOFF.md).
 
 ## Install
 

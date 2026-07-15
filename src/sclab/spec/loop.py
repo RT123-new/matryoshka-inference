@@ -4,22 +4,30 @@ Every emitted token is one of:
 
 * a **burst** token — plain greedy generation from the engine (what a
   non-accelerated client would have received),
-* an **accepted draft** token — verified equal to the engine's greedy choice
-  at its position by a scoring round-trip,
+* an **accepted draft** token — verified *exactly* equal to the engine's
+  unambiguous greedy choice at its position by a scoring round-trip,
 * a **correction** token — the engine's greedy choice at the first position
-  where the draft diverged,
+  where the draft diverged (only when that choice is itself unambiguous),
 * a **bonus** token — the single token the engine generates past a fully
   accepted draft.
 
-By induction all four are exactly what greedy decoding would have produced,
-so the final text is byte-identical to running the engine plainly — the
-speedup comes purely from verifying many tokens per round-trip instead of
-generating one per sequential decode step.
+By induction all four are exactly what greedy decoding would have produced *for
+a raw-argmax policy* (see ``verify._GREEDY_POLICY``), so the final text is
+byte-identical to running the engine plainly with that policy — the speedup
+comes purely from verifying many tokens per round-trip instead of one per
+sequential decode step.
 
-Seam safety: if the engine's joint tokenization of ``context + draft`` merges
-characters across the boundary (or the correction/bonus token has an empty
-surface, e.g. a special token), the round is discarded and the loop falls
-back to a plain burst — never guess, always fall back.
+Two safety rules, both learned the hard way against real engines:
+
+* **Positional shift.** ``score_completion`` must be told the endpoint's
+  measured ``shift`` (see ``verify.probe_endpoint``); the wrong shift silently
+  drops or duplicates tokens. Callers that speculate against an unprobed or
+  unusable endpoint must fall back to plain generation instead.
+* **Never stall, never guess.** If a draft token is not the unambiguous greedy
+  choice and the engine offers no usable correction (a tie, an empty/special
+  surface, or a tokenization seam), the round emits nothing speculative and the
+  loop takes a plain burst to step past — it never re-proposes the same
+  unverifiable token in a loop, and never emits a token it could not verify.
 """
 
 from __future__ import annotations
@@ -36,28 +44,52 @@ class SpecStats:
     verify_rounds: int = 0
     burst_rounds: int = 0
     tokens_total: int = 0
-    tokens_accepted: int = 0     # draft tokens that survived verification
+    tokens_accepted: int = 0     # REAL draft tokens verified equal to greedy
     tokens_correction: int = 0
     tokens_bonus: int = 0
     tokens_burst: int = 0
     seam_fallbacks: int = 0
+    verify_rounds_zero_accept: int = 0   # verify rounds that accepted 0 draft tokens
     finish_reason: str | None = None
     error: str | None = None
     recent_accepts: list[int] = field(default_factory=list)
 
+    # -- honest, disaggregated per-verify telemetry ----------------------- #
     @property
-    def accepted_per_verify(self) -> float:
+    def draft_tokens_accepted_per_verify(self) -> float:
+        """Accepted *draft* tokens only — the actual speculation win."""
+        return (self.tokens_accepted / self.verify_rounds) if self.verify_rounds else 0.0
+
+    @property
+    def tokens_emitted_per_verify(self) -> float:
+        """All tokens a verify round yields: accepted draft + correction + bonus."""
         if not self.verify_rounds:
             return 0.0
         return (self.tokens_accepted + self.tokens_correction + self.tokens_bonus) / self.verify_rounds
 
     @property
-    def tokens_per_request(self) -> float:
-        """The universal north-star: emitted tokens per engine round-trip.
+    def corrections_per_verify(self) -> float:
+        return (self.tokens_correction / self.verify_rounds) if self.verify_rounds else 0.0
 
-        Plain sequential decoding is bounded by 1 token per decode step;
-        anything above ~1 per *request* here is time bought back.
+    @property
+    def bonus_tokens_per_verify(self) -> float:
+        return (self.tokens_bonus / self.verify_rounds) if self.verify_rounds else 0.0
+
+    @property
+    def accepted_per_verify(self) -> float:
+        """Backward-compatible alias: accepted *draft* tokens per verify round.
+
+        Historically this also folded in correction and bonus tokens, which
+        made a run that accepted **zero** drafts but emitted one correction per
+        round look like "1.0 accepted/verify". It now means what its name says;
+        use :attr:`tokens_emitted_per_verify` for the old, broader quantity.
         """
+        return self.draft_tokens_accepted_per_verify
+
+    @property
+    def tokens_per_request(self) -> float:
+        """Emitted tokens per engine round-trip. Plain decoding is bounded at 1
+        token per decode step; above ~1 per request here is time bought back."""
         return (self.tokens_total / self.requests) if self.requests else 0.0
 
     def summary(self) -> dict:
@@ -71,6 +103,11 @@ class SpecStats:
             "tokens_bonus": self.tokens_bonus,
             "tokens_burst": self.tokens_burst,
             "seam_fallbacks": self.seam_fallbacks,
+            "verify_rounds_zero_accept": self.verify_rounds_zero_accept,
+            "draft_tokens_accepted_per_verify": round(self.draft_tokens_accepted_per_verify, 3),
+            "tokens_emitted_per_verify": round(self.tokens_emitted_per_verify, 3),
+            "corrections_per_verify": round(self.corrections_per_verify, 3),
+            "bonus_tokens_per_verify": round(self.bonus_tokens_per_verify, 3),
             "accepted_per_verify": round(self.accepted_per_verify, 3),
             "tokens_per_request": round(self.tokens_per_request, 3),
             "finish_reason": self.finish_reason,
@@ -89,13 +126,16 @@ def spec_generate(
     min_draft_chars: int = 8,
     burst_tokens: int = 16,
     backoff_rounds: int = 4,
+    shift: int = 0,
     timeout: int = 600,
 ) -> tuple[str, SpecStats]:
     """Generate greedily via the engine's public API, faster where possible.
 
     Returns ``(generated_text, stats)``. The text is byte-identical to what a
-    single plain greedy request would produce (see module docstring); pass the
-    same ``memory`` across calls to let acceptance compound over a session.
+    single plain greedy request (with ``verify._GREEDY_POLICY``) would produce;
+    pass the same ``memory`` across calls to let acceptance compound. ``shift``
+    is the endpoint's measured positional shift (see ``verify.probe_endpoint``);
+    it must be correct or verification will corrupt the output.
     """
     memory = memory if memory is not None else LookupMemory()
     stats = SpecStats()
@@ -136,7 +176,7 @@ def spec_generate(
 
         # --- verify the draft with one scoring round-trip ------------------ #
         sent = ctx + draft
-        sr = score_completion(upstream, api_key, model, sent, timeout=timeout)
+        sr = score_completion(upstream, api_key, model, sent, shift=shift, timeout=timeout)
         stats.requests += 1
         if sr.error:
             stats.error = sr.error
@@ -145,10 +185,10 @@ def spec_generate(
         draft_toks = sr.draft_tokens(len(ctx), len(sent))
         if draft_toks is None:
             # Tokenization merged characters across the seam: unverifiable.
-            # This is a one-token boundary hiccup, not an acceptance collapse,
-            # so step past it with a single burst and resume speculating —
-            # don't trigger the long DSpark-style backoff.
+            # A one-token boundary hiccup, not an acceptance collapse, so step
+            # past it with a single burst and resume speculating.
             stats.seam_fallbacks += 1
+            stats.verify_rounds_zero_accept += 1
             forced_bursts = 1
             continue
 
@@ -158,7 +198,10 @@ def spec_generate(
             if t.is_greedy:
                 accepted.append(t.surface)
             else:
-                correction = t.top_surface
+                # Only correct when the engine's greedy choice here is itself
+                # unambiguous and appendable; otherwise leave it to a burst.
+                if t.top_surface and not t.top_ambiguous:
+                    correction = t.top_surface
                 break
 
         # Never emit past the budget: a plain max_tokens run stops exactly at
@@ -168,37 +211,40 @@ def spec_generate(
         new_text = "".join(accepted)
         n_new = len(accepted)
         finish = None
+        whole_draft_accepted = (len(accepted) == len(draft_toks))
         if n_new < remaining and correction is not None:
-            if not correction:
-                # Empty/special-token surface: cannot append faithfully as
-                # text. Step past it with one burst (which reproduces it
-                # natively) rather than a long backoff.
-                stats.seam_fallbacks += 1
-                forced_bursts = 1
-                continue
             new_text += correction
             n_new += 1
             stats.tokens_correction += 1
-        elif n_new < remaining and correction is None:
-            bonus = sr.generated_tokens(len(sent))
-            if bonus and bonus[0].surface:
-                new_text += bonus[0].surface
+        elif n_new < remaining and correction is None and whole_draft_accepted:
+            bonus = sr.greedy_after(len(sent))
+            if bonus.surface and not bonus.ambiguous:
+                new_text += bonus.surface
                 n_new += 1
                 stats.tokens_bonus += 1
                 finish = sr.finish_reason
             elif sr.finish_reason == "stop":
                 finish = "stop"
-        elif correction is None and sr.finish_reason == "stop":
+        elif whole_draft_accepted and sr.finish_reason == "stop":
             finish = "stop"
 
+        if len(accepted) == 0:
+            stats.verify_rounds_zero_accept += 1
         stats.tokens_accepted += len(accepted)
         stats.tokens_total += n_new
         stats.recent_accepts.append(len(accepted))
         del stats.recent_accepts[:-8]
-        # DSpark-style backoff: when drafts stop landing, leave the verify
-        # lane for a while instead of paying scoring overhead for nothing.
-        if len(stats.recent_accepts) >= 3 and sum(stats.recent_accepts[-3:]) == 0:
+
+        if n_new == 0:
+            # Nothing emitted this round (first draft token unverifiable and no
+            # usable correction). Force a plain burst so we always make forward
+            # progress instead of re-proposing the same wall.
+            forced_bursts = 1
+        elif len(stats.recent_accepts) >= 3 and sum(stats.recent_accepts[-3:]) == 0:
+            # DSpark-style backoff: when drafts stop landing, leave the verify
+            # lane for a while instead of paying scoring overhead for nothing.
             forced_bursts = backoff_rounds
+
         ctx += new_text
         out += new_text
         memory.observe(new_text)

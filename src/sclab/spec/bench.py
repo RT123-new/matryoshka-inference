@@ -19,19 +19,40 @@ from typing import Any
 
 from sclab.spec.loop import spec_generate
 from sclab.spec.memory import LookupMemory
-from sclab.spec.verify import generate_burst, score_completion
+from sclab.spec.verify import EndpointCapability, generate_burst, probe_endpoint, score_completion
 
 
 def run_bench(upstream: str, api_key: str, model: str, prompt: str,
               max_tokens: int = 256, draft_chars: int = 64, burst_tokens: int = 16,
-              warm_text: str | None = None, timeout: int = 600) -> dict[str, Any]:
-    """Baseline (one plain call) vs the speculation loop, same greedy request."""
+              warm_text: str | None = None, capability: EndpointCapability | None = None,
+              timeout: int = 600) -> dict[str, Any]:
+    """Baseline (one plain call) vs the speculation loop, same greedy request.
+
+    Probes the endpoint first (unless a ``capability`` is supplied) and only
+    speculates when it is proven usable; against an unusable endpoint it reports
+    the baseline and the reason, never a mis-verified speculative result.
+    """
+    if capability is None:
+        capability = probe_endpoint(upstream, api_key, model, timeout=timeout)
+
     t0 = time.perf_counter()
     base = generate_burst(upstream, api_key, model, prompt, max_tokens, timeout=timeout)
     base_s = time.perf_counter() - t0
     if base.error:
         return {"error": f"baseline failed: {base.error}"}
     base_tokens = int((base.usage or {}).get("completion_tokens") or 0)
+    baseline = {"seconds": round(base_s, 4), "tokens": base_tokens,
+                "tok_s": round(base_tokens / base_s, 2) if base_s else None}
+
+    if not capability.usable:
+        return {
+            "capability": capability.status,
+            "capability_detail": capability.detail,
+            "spec_available": False,
+            "baseline": baseline,
+            "note": f"endpoint cannot verify drafts ({capability.status}); "
+                    "speculation disabled, plain generation only.",
+        }
 
     memory = LookupMemory()
     if warm_text:
@@ -39,15 +60,17 @@ def run_bench(upstream: str, api_key: str, model: str, prompt: str,
     t0 = time.perf_counter()
     spec_text, stats = spec_generate(
         upstream, api_key, model, prompt,
-        max_tokens=max_tokens, memory=memory,
+        max_tokens=max_tokens, memory=memory, shift=capability.shift or 0,
         draft_chars=draft_chars, burst_tokens=burst_tokens, timeout=timeout,
     )
     spec_s = time.perf_counter() - t0
 
     identical = spec_text == base.text
     return {
-        "baseline": {"seconds": round(base_s, 4), "tokens": base_tokens,
-                     "tok_s": round(base_tokens / base_s, 2) if base_s else None},
+        "capability": capability.status,
+        "shift": capability.shift,
+        "spec_available": True,
+        "baseline": baseline,
         "spec": {"seconds": round(spec_s, 4), **stats.summary(),
                  "tok_s": round(stats.tokens_total / spec_s, 2) if spec_s else None},
         "identical_output": identical,
@@ -111,15 +134,24 @@ def _best_of(repeats: int, fn) -> float:
 def format_bench(result: dict[str, Any]) -> str:
     if result.get("error"):
         return f"error: {result['error']}"
-    b, s = result["baseline"], result["spec"]
+    b = result["baseline"]
+    if not result.get("spec_available", True):
+        return "\n".join([
+            f"capability: {result.get('capability')} — {result.get('capability_detail', '')}",
+            f"baseline : {b['tokens']} tok in {b['seconds']}s  ({b['tok_s']} tok/s, 1 request)",
+            result.get("note", "speculation unavailable on this endpoint."),
+        ])
+    s = result["spec"]
     lines = [
+        f"capability: {result.get('capability')} (shift={result.get('shift')})",
         f"baseline : {b['tokens']} tok in {b['seconds']}s  ({b['tok_s']} tok/s, 1 request)",
         f"spec     : {s['tokens_total']} tok in {s['seconds']}s  ({s['tok_s']} tok/s, "
         f"{s['requests']} requests, {s['tokens_per_request']} tok/request)",
-        f"           accepted/verify={s['accepted_per_verify']}  "
+        f"           draft_accepted/verify={s['draft_tokens_accepted_per_verify']}  "
+        f"emitted/verify={s['tokens_emitted_per_verify']}  "
         f"draft={s['tokens_accepted']} corr={s['tokens_correction']} "
         f"bonus={s['tokens_bonus']} burst={s['tokens_burst']} "
-        f"seam_fallbacks={s['seam_fallbacks']}",
+        f"seam_fallbacks={s['seam_fallbacks']} zero_accept_rounds={s['verify_rounds_zero_accept']}",
         f"identical output: {result['identical_output']}",
         f"speedup: {result['speedup']}x",
     ]
